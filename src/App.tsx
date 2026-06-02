@@ -1,0 +1,465 @@
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { AppSidebar } from "./components/AppSidebar";
+import { ChatSurface } from "./components/ChatSurface";
+import { Composer } from "./components/Composer";
+import { ToolPanels } from "./components/ToolPanels";
+import { ToolPicker } from "./components/ToolPicker";
+import { parseCommandLine, readError } from "./lib/commandLine";
+import {
+  addWorkspace,
+  gitStatus,
+  harnessHealth,
+  listenSessionComplete,
+  listenSessionStream,
+  listSessions,
+  listSupportedAgents,
+  listWorkspaceFiles,
+  listWorkspaces,
+  pickWorkspaceDirectory,
+  probeAgent,
+  removeWorkspace,
+  runShellCommand,
+  startAgentSession,
+} from "./lib/tauri";
+import type {
+  AgentDefinition,
+  AgentProbeResult,
+  CommandRunResult,
+  FileEntry,
+  HarnessHealth,
+  SessionRecord,
+  Workspace,
+} from "./types/agent";
+import type { PermissionMode, ToolId } from "./types/ui";
+import { parseSkEvent, type SkEvent } from "./types/scidekick";
+
+export interface RunningSession {
+  id: string;
+  prompt: string;
+  agentId: string;
+  workspacePath: string;
+  startedAt: number;
+  stdout: string;
+  stderr: string;
+  events: SkEvent[];
+}
+
+const SCIDEKICK_PROBE_ARGS = ["--version"] as const;
+const DEFAULT_PROMPT = "";
+
+export function App() {
+  const [agents, setAgents] = useState<AgentDefinition[]>([]);
+  const [selectedAgentId, setSelectedAgentId] = useState("scidekick");
+  const [customCommand, setCustomCommand] = useState("");
+  const [customArgs, setCustomArgs] = useState("{prompt}");
+  const [probe, setProbe] = useState<AgentProbeResult | null>(null);
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [workspacePath, setWorkspacePath] = useState("");
+  const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
+  const [sessions, setSessions] = useState<SessionRecord[]>([]);
+  const [activeSession, setActiveSession] = useState<SessionRecord | null>(null);
+  const [runningSession, setRunningSession] = useState<RunningSession | null>(null);
+  const runningSessionRef = useRef<RunningSession | null>(null);
+  const pendingStreamsRef = useRef<
+    Map<string, { stdout: string; stderr: string; events: SkEvent[] }>
+  >(new Map());
+  const [git, setGit] = useState<CommandRunResult | null>(null);
+  const [commandLine, setCommandLine] = useState("pwd");
+  const [commandResult, setCommandResult] = useState<CommandRunResult | null>(null);
+  const [health, setHealth] = useState<HarnessHealth | null>(null);
+  const [files, setFiles] = useState<FileEntry[]>([]);
+  const [activeTool, setActiveTool] = useState<ToolId>("project-files");
+  const [bottomTools, setBottomTools] = useState<ToolId[]>([]);
+  const [rightPanelWidth, setRightPanelWidth] = useState(360);
+  const [permissionMode, setPermissionMode] = useState<PermissionMode>("default");
+  const [thinkingEffort, setThinkingEffort] = useState<string>("default");
+  const [selectedModel, setSelectedModel] = useState<string>("default");
+  const [attachments, setAttachments] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  const selectedAgent = useMemo(
+    () => agents.find((agent) => agent.id === selectedAgentId) ?? agents[0],
+    [agents, selectedAgentId],
+  );
+
+  const activeWorkspace = useMemo(
+    () => workspaces.find((workspace) => workspace.path === workspacePath) ?? null,
+    [workspacePath, workspaces],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function safeCall<T>(label: string, fn: () => Promise<T>, onOk: (value: T) => void) {
+      try {
+        onOk(await fn());
+      } catch (err) {
+        console.error(`[scidekick-desktop] ${label} failed:`, err);
+      }
+    }
+
+    async function load() {
+      await safeCall("harnessHealth", harnessHealth, (value) => { if (!cancelled) setHealth(value); });
+      await safeCall("listSupportedAgents", listSupportedAgents, (value) => { if (!cancelled) setAgents(value); });
+      await safeCall("listWorkspaces", listWorkspaces, (value) => {
+        if (cancelled) return;
+        setWorkspaces(value);
+        if (!workspacePath) setWorkspacePath(value[0]?.path ?? "");
+      });
+      await safeCall("listSessions", listSessions, (value) => {
+        if (cancelled) return;
+        setSessions(value);
+        setActiveSession(value[0] ?? null);
+      });
+
+      if (cancelled) return;
+
+      const scidekick = agents.length > 0
+        ? agents.find((agent: AgentDefinition) => agent.id === "scidekick")
+        : null;
+      if (scidekick) {
+        try {
+          const result = await probeAgent(scidekick.command, [...SCIDEKICK_PROBE_ARGS]);
+          if (!cancelled) setProbe(result);
+        } catch (err) {
+          console.error("[scidekick-desktop] probeAgent failed:", err);
+        }
+      }
+
+      if (!cancelled) setLoading(false);
+    }
+
+    void load();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!workspacePath) {
+      setFiles([]);
+      setGit(null);
+      return;
+    }
+
+    async function loadWorkspaceTools() {
+      try {
+        const [nextFiles, nextGit] = await Promise.all([
+          listWorkspaceFiles(workspacePath, 100),
+          gitStatus(workspacePath).catch(() => null),
+        ]);
+        if (cancelled) return;
+        setFiles(nextFiles);
+        setGit(nextGit);
+      } catch (err) {
+        if (!cancelled) setError(readError(err));
+      }
+    }
+
+    void loadWorkspaceTools();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [workspacePath]);
+
+  useEffect(() => {
+    let active = true;
+    let unlistenStream: (() => void) | null = null;
+    let unlistenComplete: (() => void) | null = null;
+
+    void (async () => {
+      try {
+        const stream = await listenSessionStream((payload) => {
+          const pending = pendingStreamsRef.current.get(payload.sessionId) ?? {
+            stdout: "",
+            stderr: "",
+            events: [],
+          };
+          let parsedEvent: SkEvent | null = null;
+          if (payload.channel === "stdout") {
+            parsedEvent = parseSkEvent(payload.line);
+            if (parsedEvent) {
+              pending.events = [...pending.events, parsedEvent];
+            } else {
+              pending.stdout += `${payload.line}\n`;
+            }
+          } else {
+            pending.stderr += `${payload.line}\n`;
+          }
+          pendingStreamsRef.current.set(payload.sessionId, pending);
+
+          setRunningSession((current) => {
+            if (!current || current.id !== payload.sessionId) return current;
+            const next: RunningSession = {
+              ...current,
+              stdout: pending.stdout,
+              stderr: pending.stderr,
+              events: pending.events,
+            };
+            runningSessionRef.current = next;
+            return next;
+          });
+        });
+        const complete = await listenSessionComplete((payload) => {
+          pendingStreamsRef.current.delete(payload.sessionId);
+          setActiveSession(payload.record);
+          setRunningSession((current) => {
+            if (!current || current.id !== payload.sessionId) return current;
+            runningSessionRef.current = null;
+            return null;
+          });
+          void listSessions().then(setSessions).catch(() => {});
+        });
+
+        if (!active) {
+          stream();
+          complete();
+          return;
+        }
+        unlistenStream = stream;
+        unlistenComplete = complete;
+      } catch (err) {
+        console.error("[scidekick-desktop] failed to subscribe to session events:", err);
+      }
+    })();
+
+    return () => {
+      active = false;
+      unlistenStream?.();
+      unlistenComplete?.();
+    };
+  }, []);
+
+  async function handleOpenWorkspacePath() {
+    await openWorkspacePath(workspacePath);
+  }
+
+  async function handlePickWorkspace() {
+    await runBusy(async () => {
+      const selected = await pickWorkspaceDirectory();
+      if (selected) await openWorkspacePath(selected, false);
+    });
+  }
+
+  async function openWorkspacePath(path: string, manageBusy = true) {
+    const action = async () => {
+      const next = await addWorkspace(path);
+      setWorkspaces(next);
+      setWorkspacePath(next[0]?.path ?? path);
+    };
+    if (manageBusy) await runBusy(action);
+    else await action();
+  }
+
+  async function handleRemoveWorkspace(id: string) {
+    await runBusy(async () => {
+      const next = await removeWorkspace(id);
+      setWorkspaces(next);
+      setWorkspacePath(next[0]?.path ?? "");
+    });
+  }
+
+  async function handleStartSession(event: FormEvent) {
+    event.preventDefault();
+    if (!selectedAgent || !workspacePath) return;
+    if (runningSession) return;
+    if (prompt.trim() === "") return;
+
+    const sentPrompt = prompt;
+    setError(null);
+    setActiveSession(null);
+    setPrompt("");
+
+    try {
+      const isScidekick = selectedAgent.id === "scidekick";
+      const started = await startAgentSession({
+        agentId: selectedAgent.id,
+        workspacePath,
+        prompt: sentPrompt,
+        command: isScidekick ? undefined : customCommand,
+        args: isScidekick ? undefined : parseCommandLine(customArgs),
+        model: isScidekick && selectedModel !== "default" ? selectedModel : undefined,
+        thinkingEffort:
+          isScidekick && thinkingEffort !== "default" ? thinkingEffort : undefined,
+      });
+      const pending = pendingStreamsRef.current.get(started.id) ?? {
+        stdout: "",
+        stderr: "",
+        events: [] as SkEvent[],
+      };
+      const next: RunningSession = {
+        id: started.id,
+        prompt: started.prompt,
+        agentId: started.agentId,
+        workspacePath: started.workspacePath,
+        startedAt: started.startedAt,
+        stdout: pending.stdout,
+        stderr: pending.stderr,
+        events: pending.events,
+      };
+      runningSessionRef.current = next;
+      setRunningSession(next);
+    } catch (err) {
+      console.error("[scidekick-desktop] startAgentSession failed:", err);
+      setError(readError(err));
+      setPrompt(sentPrompt);
+    }
+  }
+
+  async function handleGitStatus() {
+    if (!workspacePath) return;
+    await runBusy(async () => {
+      setGit(await gitStatus(workspacePath));
+    });
+  }
+
+  async function handleRefreshFiles() {
+    if (!workspacePath) return;
+    await runBusy(async () => {
+      setFiles(await listWorkspaceFiles(workspacePath, 100));
+    });
+  }
+
+  async function handleRunCommand(event: FormEvent) {
+    event.preventDefault();
+    if (!workspacePath) return;
+    const parts = parseCommandLine(commandLine);
+    const command = parts[0];
+    if (!command) return;
+
+    await runBusy(async () => {
+      setCommandResult(await runShellCommand({ workspacePath, command, args: parts.slice(1) }));
+    });
+  }
+
+  function handleToggleBottomTool(tool: ToolId) {
+    setBottomTools((current) => {
+      if (current.includes(tool)) return current.filter((item) => item !== tool);
+      return [...current, tool].slice(-2);
+    });
+    setActiveTool(tool);
+  }
+
+  function handleRightResizeStart(event: React.MouseEvent) {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = rightPanelWidth;
+
+    const onMove = (moveEvent: MouseEvent) => {
+      const delta = startX - moveEvent.clientX;
+      setRightPanelWidth(Math.min(560, Math.max(280, startWidth + delta)));
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
+
+  async function runBusy(action: () => Promise<void>) {
+    setBusy(true);
+    setError(null);
+    try {
+      await action();
+    } catch (err) {
+      console.error("[scidekick-desktop] runBusy failed:", err);
+      setError(readError(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <main className="harnss-shell">
+      <AppSidebar
+        workspaces={workspaces}
+        sessions={sessions}
+        activeWorkspace={activeWorkspace}
+        activeSession={activeSession}
+        workspacePath={workspacePath}
+        busy={busy}
+        health={health}
+        probe={probe}
+        onWorkspacePathChange={setWorkspacePath}
+        onOpenWorkspacePath={handleOpenWorkspacePath}
+        onPickWorkspace={handlePickWorkspace}
+        onSelectWorkspace={setWorkspacePath}
+        onRemoveWorkspace={handleRemoveWorkspace}
+        onSelectSession={setActiveSession}
+        onNewChat={() => {
+          setActiveSession(null);
+          setPrompt(DEFAULT_PROMPT);
+        }}
+      />
+
+      <section className={bottomTools.length > 0 ? "workspace-area with-bottom-dock" : "workspace-area"}>
+        <ChatSurface
+          activeWorkspace={activeWorkspace}
+          activeSession={activeSession}
+          runningSession={runningSession}
+          busy={busy}
+          error={error}
+          loading={loading}
+          onPickWorkspace={handlePickWorkspace}
+        >
+          <Composer
+            agents={agents}
+            selectedAgentId={selectedAgentId}
+            customCommand={customCommand}
+            customArgs={customArgs}
+            prompt={prompt}
+            busy={busy || runningSession !== null}
+            workspaceReady={!!activeWorkspace}
+            permissionMode={permissionMode}
+            selectedModel={selectedModel}
+            thinkingEffort={thinkingEffort}
+            attachments={attachments}
+            onSelectedAgentIdChange={setSelectedAgentId}
+            onCustomCommandChange={setCustomCommand}
+            onCustomArgsChange={setCustomArgs}
+            onPromptChange={setPrompt}
+            onPermissionModeChange={setPermissionMode}
+            onSelectedModelChange={setSelectedModel}
+            onThinkingEffortChange={setThinkingEffort}
+            onAddAttachment={() => setAttachments((current) => [...current, `context-${current.length + 1}.png`])}
+            onRemoveAttachment={(name) => setAttachments((current) => current.filter((item) => item !== name))}
+            onSubmit={handleStartSession}
+          />
+        </ChatSurface>
+
+        <ToolPicker
+          activeSideTool={activeTool}
+          bottomTools={bottomTools}
+          onSelectSideTool={setActiveTool}
+          onToggleBottomTool={handleToggleBottomTool}
+        />
+
+        <ToolPanels
+          activeTool={activeTool}
+          bottomTools={bottomTools}
+          agents={agents}
+          files={files}
+          git={git}
+          commandLine={commandLine}
+          commandResult={commandResult}
+          sessions={sessions}
+          activeWorkspace={activeWorkspace}
+          busy={busy}
+          rightPanelWidth={rightPanelWidth}
+          onRightResizeStart={handleRightResizeStart}
+          onRefreshFiles={handleRefreshFiles}
+          onRefreshGit={handleGitStatus}
+          onCommandLineChange={setCommandLine}
+          onRunCommand={handleRunCommand}
+          onCloseBottomTool={(tool) => setBottomTools((current) => current.filter((item) => item !== tool))}
+        />
+      </section>
+    </main>
+  );
+}
