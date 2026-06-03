@@ -7,6 +7,7 @@ import type {
   CommandRunResult,
   FileEntry,
   HarnessHealth,
+  HarnessSettings,
   SessionCompletePayload,
   SessionRecord,
   SessionStarted,
@@ -52,6 +53,14 @@ export function stopAgentSession(sessionId: string): Promise<boolean> {
   return invoke("stop_agent_session", { sessionId });
 }
 
+export function getSettings(): Promise<HarnessSettings> {
+  return invoke("get_settings");
+}
+
+export function updateSettings(settings: HarnessSettings): Promise<HarnessSettings> {
+  return invoke("update_settings", { settings });
+}
+
 export function listenSessionStream(
   handler: (event: SessionStreamPayload) => void,
 ): Promise<UnlistenFn> {
@@ -78,5 +87,16 @@ export function listWorkspaceFiles(workspacePath: string, limit = 80): Promise<F
 
 export async function pickWorkspaceDirectory(): Promise<string | null> {
   const selected = await open({ directory: true, multiple: false, title: "Open Workspace" });
+  return typeof selected === "string" ? selected : null;
+}
+
+export async function pickAgentBinary(): Promise<string | null> {
+  // Single-file picker for an agent binary; we validate by re-probing
+  // rather than trying to detect executability up-front.
+  const selected = await open({
+    directory: false,
+    multiple: false,
+    title: "Choose agent binary",
+  });
   return typeof selected === "string" ? selected : null;
 }

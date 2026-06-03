@@ -27,6 +27,7 @@ interface AppSidebarProps {
   onRemoveWorkspace: (id: string) => void;
   onSelectSession: (session: SessionRecord) => void;
   onNewChat: () => void;
+  onOpenSettings: () => void;
 }
 
 export function AppSidebar({
@@ -45,6 +46,7 @@ export function AppSidebar({
   onRemoveWorkspace,
   onSelectSession,
   onNewChat,
+  onOpenSettings,
 }: AppSidebarProps) {
   const conversations = conversationSummaries(sessions);
   return (
@@ -134,7 +136,7 @@ export function AppSidebar({
       </div>
 
       <div className="sidebar-footer">
-        <button type="button">
+        <button type="button" onClick={onOpenSettings}>
           <Settings size={14} />
           Settings
         </button>

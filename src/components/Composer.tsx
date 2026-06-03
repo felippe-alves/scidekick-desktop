@@ -1,4 +1,5 @@
 import { ArrowUp, ChevronDown, Paperclip } from "lucide-react";
+import { EFFORT_OPTIONS, MODEL_OPTIONS } from "../lib/agentOptions";
 import type { AgentDefinition } from "../types/agent";
 import type { PermissionMode } from "../types/ui";
 
@@ -25,28 +26,6 @@ interface ComposerProps {
   onRemoveAttachment: (name: string) => void;
   onSubmit: (event: React.FormEvent) => void;
 }
-
-// Hardcoded canonical model list. Scidekick accepts these via --model fuzzy match.
-// Source: scidekick/packages/coding-agent/src/cli/list-models.ts canonical names.
-const MODEL_OPTIONS: Array<{ value: string; label: string }> = [
-  { value: "default", label: "Auto" },
-  { value: "opus", label: "Claude Opus" },
-  { value: "sonnet", label: "Claude Sonnet" },
-  { value: "haiku", label: "Claude Haiku" },
-  { value: "gpt-5", label: "GPT-5" },
-  { value: "gpt-5.1", label: "GPT-5.1" },
-  { value: "gpt-5.2", label: "GPT-5.2" },
-  { value: "o1", label: "o1" },
-];
-
-// THINKING_EFFORTS from scidekick/packages/ai (per coding-agent/src/commands/launch.ts).
-const EFFORT_OPTIONS: Array<{ value: string; label: string }> = [
-  { value: "default", label: "Auto reasoning" },
-  { value: "minimal", label: "Minimal" },
-  { value: "low", label: "Low" },
-  { value: "medium", label: "Medium" },
-  { value: "high", label: "High" },
-];
 
 export function Composer({
   agents,

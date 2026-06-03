@@ -2,11 +2,13 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { AppSidebar } from "./components/AppSidebar";
 import { ChatSurface } from "./components/ChatSurface";
 import { Composer } from "./components/Composer";
+import { SettingsDialog } from "./components/SettingsDialog";
 import { ToolPanels } from "./components/ToolPanels";
 import { ToolPicker } from "./components/ToolPicker";
 import { parseCommandLine, readError } from "./lib/commandLine";
 import {
   addWorkspace,
+  getSettings,
   gitStatus,
   harnessHealth,
   listenSessionComplete,
@@ -15,21 +17,25 @@ import {
   listSupportedAgents,
   listWorkspaceFiles,
   listWorkspaces,
+  pickAgentBinary,
   pickWorkspaceDirectory,
   probeAgent,
   removeWorkspace,
   runShellCommand,
   startAgentSession,
   stopAgentSession,
+  updateSettings,
 } from "./lib/tauri";
-import type {
-  AgentDefinition,
-  AgentProbeResult,
-  CommandRunResult,
-  FileEntry,
-  HarnessHealth,
-  SessionRecord,
-  Workspace,
+import {
+  emptyHarnessSettings,
+  type AgentDefinition,
+  type AgentProbeResult,
+  type CommandRunResult,
+  type FileEntry,
+  type HarnessHealth,
+  type HarnessSettings,
+  type SessionRecord,
+  type Workspace,
 } from "./types/agent";
 import type { PermissionMode, ToolId } from "./types/ui";
 import { parseSkEvent, type SkEvent } from "./types/scidekick";
@@ -83,6 +89,8 @@ export function App() {
   const [stoppingSessionId, setStoppingSessionId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [settings, setSettings] = useState<HarnessSettings>(emptyHarnessSettings());
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const selectedAgent = useMemo(
     () => agents.find((agent) => agent.id === selectedAgentId) ?? agents[0],
@@ -112,12 +120,27 @@ export function App() {
     }
 
     async function load() {
+      let loadedSettings: HarnessSettings = emptyHarnessSettings();
+      await safeCall("getSettings", getSettings, (value) => {
+        if (cancelled) return;
+        loadedSettings = value;
+        setSettings(value);
+        const composer = value.composer;
+        if (composer.selectedAgentId) setSelectedAgentId(composer.selectedAgentId);
+        if (composer.selectedModel) setSelectedModel(composer.selectedModel);
+        if (composer.thinkingEffort) setThinkingEffort(composer.thinkingEffort);
+      });
       await safeCall("harnessHealth", harnessHealth, (value) => { if (!cancelled) setHealth(value); });
       await safeCall("listSupportedAgents", listSupportedAgents, (value) => { if (!cancelled) setAgents(value); });
       await safeCall("listWorkspaces", listWorkspaces, (value) => {
         if (cancelled) return;
         setWorkspaces(value);
-        if (!workspacePath) setWorkspacePath(value[0]?.path ?? "");
+        if (!workspacePath) {
+          const preferred = loadedSettings.composer.lastWorkspacePath;
+          const fallback = value[0]?.path ?? "";
+          const next = preferred && value.some((w) => w.path === preferred) ? preferred : fallback;
+          setWorkspacePath(next);
+        }
       });
       await safeCall("listSessions", listSessions, (value) => {
         if (cancelled) return;
@@ -128,16 +151,14 @@ export function App() {
 
       if (cancelled) return;
 
-      const scidekick = agents.length > 0
-        ? agents.find((agent: AgentDefinition) => agent.id === "scidekick")
-        : null;
-      if (scidekick) {
-        try {
-          const result = await probeAgent(scidekick.command, [...SCIDEKICK_PROBE_ARGS]);
-          if (!cancelled) setProbe(result);
-        } catch (err) {
-          console.error("[scidekick-desktop] probeAgent failed:", err);
-        }
+      // Probe whichever binary the user has configured (override > registry default).
+      const scidekickCommand =
+        loadedSettings.agentCommands.scidekick?.trim() || "sk";
+      try {
+        const result = await probeAgent(scidekickCommand, [...SCIDEKICK_PROBE_ARGS]);
+        if (!cancelled) setProbe(result);
+      } catch (err) {
+        console.error("[scidekick-desktop] probeAgent failed:", err);
       }
 
       if (!cancelled) setLoading(false);
@@ -177,6 +198,24 @@ export function App() {
     return () => {
       cancelled = true;
     };
+  }, [workspacePath]);
+
+  // Persist the last opened workspace so the harness reopens to where the
+  // user was. Skip when settings haven't loaded yet (empty path) or the
+  // value already matches what we just hydrated.
+  useEffect(() => {
+    if (!workspacePath) return;
+    setSettings((current) => {
+      if (current.composer.lastWorkspacePath === workspacePath) return current;
+      const next: HarnessSettings = {
+        ...current,
+        composer: { ...current.composer, lastWorkspacePath: workspacePath },
+      };
+      void updateSettings(next).catch((err) =>
+        console.error("[scidekick-desktop] updateSettings(lastWorkspacePath) failed:", err),
+      );
+      return next;
+    });
   }, [workspacePath]);
 
   useEffect(() => {
@@ -369,6 +408,80 @@ export function App() {
     }
   }
 
+  function persistComposerChange(patch: Partial<HarnessSettings["composer"]>) {
+    // Mirror the change into local state immediately for snappy UI,
+    // then push to disk asynchronously. We swallow write errors because the
+    // user already sees the new value reflected; a failure surfaces on
+    // the next legitimate operation.
+    setSettings((current) => {
+      const next: HarnessSettings = {
+        ...current,
+        composer: { ...current.composer, ...patch },
+      };
+      void updateSettings(next).catch((err) =>
+        console.error("[scidekick-desktop] updateSettings failed:", err),
+      );
+      return next;
+    });
+  }
+
+  function handleSelectedAgentIdChange(id: string) {
+    setSelectedAgentId(id);
+    persistComposerChange({ selectedAgentId: id });
+  }
+
+  function handleSelectedModelChange(model: string) {
+    setSelectedModel(model);
+    persistComposerChange({ selectedModel: model });
+  }
+
+  function handleThinkingEffortChange(effort: string) {
+    setThinkingEffort(effort);
+    persistComposerChange({ thinkingEffort: effort });
+  }
+
+  async function handleNewChat() {
+    // Stop any running session before resetting conversation state — otherwise
+    // the session-complete handler will overwrite the freshly cleared
+    // activeConversationId with the now-dead conversation's id.
+    const running = runningSessionRef.current;
+    if (running) {
+      try {
+        await stopAgentSession(running.id);
+      } catch (err) {
+        console.error("[scidekick-desktop] stopAgentSession during new chat failed:", err);
+      }
+      runningSessionRef.current = null;
+      setRunningSession(null);
+      setStoppingSessionId(null);
+    }
+    setActiveConversationId(null);
+    setActiveScidekickSessionId(null);
+    setPrompt(DEFAULT_PROMPT);
+  }
+
+  function handleOpenSettings() {
+    setSettingsOpen(true);
+  }
+
+  async function handleSaveSettings(next: HarnessSettings) {
+    const saved = await updateSettings(next);
+    setSettings(saved);
+    // Re-probe immediately so the sidebar status reflects the new binary.
+    const command = saved.agentCommands.scidekick?.trim() || "sk";
+    try {
+      setProbe(await probeAgent(command, [...SCIDEKICK_PROBE_ARGS]));
+    } catch (err) {
+      console.error("[scidekick-desktop] probeAgent after save failed:", err);
+    }
+    // Apply the latest composer defaults to live state in case the user
+    // changed them through the dialog instead of the composer toolbar.
+    const composer = saved.composer;
+    if (composer.selectedAgentId) setSelectedAgentId(composer.selectedAgentId);
+    if (composer.selectedModel) setSelectedModel(composer.selectedModel);
+    if (composer.thinkingEffort) setThinkingEffort(composer.thinkingEffort);
+  }
+
   async function handleGitStatus() {
     if (!workspacePath) return;
     await runBusy(async () => {
@@ -453,11 +566,8 @@ export function App() {
           setActiveConversationId(conversationIdForSession(session));
           setActiveScidekickSessionId(scidekickSessionIdForSession(session));
         }}
-        onNewChat={() => {
-          setActiveConversationId(null);
-          setActiveScidekickSessionId(null);
-          setPrompt(DEFAULT_PROMPT);
-        }}
+        onNewChat={handleNewChat}
+        onOpenSettings={handleOpenSettings}
       />
 
       <section className={bottomTools.length > 0 ? "workspace-area with-bottom-dock" : "workspace-area"}>
@@ -484,13 +594,13 @@ export function App() {
             selectedModel={selectedModel}
             thinkingEffort={thinkingEffort}
             attachments={attachments}
-            onSelectedAgentIdChange={setSelectedAgentId}
+            onSelectedAgentIdChange={handleSelectedAgentIdChange}
             onCustomCommandChange={setCustomCommand}
             onCustomArgsChange={setCustomArgs}
             onPromptChange={setPrompt}
             onPermissionModeChange={setPermissionMode}
-            onSelectedModelChange={setSelectedModel}
-            onThinkingEffortChange={setThinkingEffort}
+            onSelectedModelChange={handleSelectedModelChange}
+            onThinkingEffortChange={handleThinkingEffortChange}
             onAddAttachment={() => setAttachments((current) => [...current, `context-${current.length + 1}.png`])}
             onRemoveAttachment={(name) => setAttachments((current) => current.filter((item) => item !== name))}
             onSubmit={handleStartSession}
@@ -524,6 +634,16 @@ export function App() {
           onCloseBottomTool={(tool) => setBottomTools((current) => current.filter((item) => item !== tool))}
         />
       </section>
+
+      <SettingsDialog
+        open={settingsOpen}
+        settings={settings}
+        scidekickProbe={probe}
+        onClose={() => setSettingsOpen(false)}
+        onSave={handleSaveSettings}
+        onPickBinary={pickAgentBinary}
+        onProbeBinary={(command) => probeAgent(command, [...SCIDEKICK_PROBE_ARGS])}
+      />
     </main>
   );
 }

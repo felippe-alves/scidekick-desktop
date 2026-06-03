@@ -6,7 +6,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State};
@@ -67,6 +67,36 @@ struct SessionRecord {
 struct HarnessStore {
     workspaces: Vec<Workspace>,
     sessions: Vec<SessionRecord>,
+    #[serde(default)]
+    settings: HarnessSettings,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct HarnessSettings {
+    /// Override binary path per agent id (e.g. "scidekick" -> "/usr/local/bin/sk").
+    /// Empty values are ignored; absent keys fall back to the registry default.
+    #[serde(default)]
+    agent_commands: HashMap<String, String>,
+    /// Last-known composer state, re-applied on launch so the user does not
+    /// have to re-pick model/effort/workspace every time.
+    #[serde(default)]
+    composer: ComposerDefaults,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct ComposerDefaults {
+    #[serde(default)]
+    selected_agent_id: Option<String>,
+    #[serde(default)]
+    selected_model: Option<String>,
+    #[serde(default)]
+    thinking_effort: Option<String>,
+    #[serde(default)]
+    approval_mode: Option<String>,
+    #[serde(default)]
+    last_workspace_path: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -205,6 +235,92 @@ fn kill_all_running(sessions: &RunningSessions) {
     }
 }
 
+/// Resolve the per-agent binary override, if one is set and non-empty.
+/// Returns `None` when reading the store fails or no override exists so
+/// callers can fall back to the registry default.
+fn agent_command_override(app: &AppHandle, agent_id: &str) -> Option<String> {
+    let store = read_store(app).ok()?;
+    let raw = store.settings.agent_commands.get(agent_id)?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+static USER_PATH: OnceLock<String> = OnceLock::new();
+
+/// Resolve the user's shell-level PATH once and cache it. macOS launchd
+/// hands GUI apps a spartan PATH (`/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin`)
+/// that omits everything users actually install agents into (`~/.local/bin`,
+/// `~/.cargo/bin`, Homebrew prefixes, asdf shims, etc.). We spawn the user's
+/// login shell once to recover the real PATH and inject it into every child
+/// we launch. Falls back to the inherited PATH if the shell call fails.
+fn user_path() -> &'static str {
+    USER_PATH.get_or_init(|| {
+        let inherited = std::env::var("PATH").unwrap_or_default();
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| {
+            if cfg!(target_os = "macos") {
+                "/bin/zsh".to_string()
+            } else {
+                "/bin/bash".to_string()
+            }
+        });
+        // `-l -i` is the broadest combination: login shells read profile files
+        // and interactive shells read rc files. `printf %s` avoids a trailing
+        // newline. stderr is discarded because interactive shells happily
+        // print "no jobs", MOTD lines, or color-prompt garbage there.
+        let output = Command::new(&shell)
+            .args(["-l", "-i", "-c", "printf %s \"$PATH\""])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output();
+        match output {
+            Ok(out) if out.status.success() => {
+                let resolved = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if resolved.is_empty() {
+                    inherited
+                } else if inherited.is_empty() {
+                    resolved
+                } else {
+                    // Merge the inherited PATH onto the end so explicit env
+                    // overrides (e.g. `PATH=… npm run tauri dev`) still win,
+                    // and shell-only entries still get a turn.
+                    merge_paths(&resolved, &inherited)
+                }
+            }
+            _ => inherited,
+        }
+    })
+}
+
+/// Combine two PATH strings, keeping the order of `primary` and appending
+/// any entries from `secondary` that are not already present.
+fn merge_paths(primary: &str, secondary: &str) -> String {
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut out = String::with_capacity(primary.len() + secondary.len() + 1);
+    for entry in primary.split(':').chain(secondary.split(':')) {
+        if entry.is_empty() || !seen.insert(entry) {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(':');
+        }
+        out.push_str(entry);
+    }
+    out
+}
+
+/// Build a `Command` with the resolved login-shell PATH injected. Every
+/// child the harness spawns must go through this so binaries installed at
+/// non-default locations resolve identically in dev and bundled launches.
+fn agent_command(program: &str) -> Command {
+    let mut cmd = Command::new(program);
+    cmd.env("PATH", user_path());
+    cmd
+}
+
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 const MAX_HISTORY: usize = 100;
@@ -248,7 +364,7 @@ fn list_supported_agents() -> &'static [AgentDefinition] {
 
 #[tauri::command]
 fn probe_agent(command: String, args: Vec<String>) -> AgentProbeResult {
-    match Command::new(&command).args(&args).output() {
+    match agent_command(&command).args(&args).output() {
         Ok(output) => AgentProbeResult {
             command,
             available: output.status.success(),
@@ -316,6 +432,39 @@ fn list_sessions(app: AppHandle) -> Result<Vec<SessionRecord>, String> {
 }
 
 #[tauri::command]
+fn get_settings(app: AppHandle) -> Result<HarnessSettings, String> {
+    Ok(read_store(&app)?.settings)
+}
+
+/// Replaces the persisted settings wholesale. The frontend reads, mutates,
+/// and writes back the entire object so the merge semantics live where the
+/// user actually sees them; the backend just persists what it is handed
+/// (with one normalization: agent-command overrides that are entirely
+/// whitespace are dropped so the registry default takes over again).
+#[tauri::command]
+fn update_settings(
+    app: AppHandle,
+    settings: HarnessSettings,
+) -> Result<HarnessSettings, String> {
+    let mut store = read_store(&app)?;
+    store.settings = normalize_settings(settings);
+    write_store(&app, &store)?;
+    Ok(store.settings)
+}
+
+/// Drop whitespace-only overrides and trim the ones we keep. Pure so it can
+/// be unit-tested without an `AppHandle`.
+fn normalize_settings(mut settings: HarnessSettings) -> HarnessSettings {
+    settings
+        .agent_commands
+        .retain(|_, value| !value.trim().is_empty());
+    for value in settings.agent_commands.values_mut() {
+        *value = value.trim().to_string();
+    }
+    settings
+}
+
+#[tauri::command]
 fn start_agent_session(
     app: AppHandle,
     sessions: State<RunningSessions>,
@@ -327,7 +476,22 @@ fn start_agent_session(
         return Err("Prompt is required".to_string());
     }
 
-    let (command_str, args) = command_for_session(&request, prompt)?;
+    let (mut command_str, args) = command_for_session(&request, prompt)?;
+    // User-provided custom commands always win. For agents whose binary
+    // comes from the registry default (currently only Scidekick), honor a
+    // per-agent override from persisted settings so a user-installed `sk`
+    // at a non-PATH location can be wired up without launching from a terminal.
+    let user_provided_command = request
+        .command
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some();
+    if !user_provided_command {
+        if let Some(override_path) = agent_command_override(&app, &request.agent_id) {
+            command_str = override_path;
+        }
+    }
     let session_id = make_id("session");
     let started_at = now_ms();
     let workspace_str = path_to_string(&workspace)?;
@@ -340,7 +504,7 @@ fn start_agent_session(
         .unwrap_or_else(|| make_id("conversation"));
     let prompt_str = prompt.to_string();
 
-    let mut cmd = Command::new(&command_str);
+    let mut cmd = agent_command(&command_str);
     cmd.args(&args)
         .current_dir(&workspace)
         .stdout(Stdio::piped())
@@ -617,7 +781,7 @@ fn run_command_in_dir(
     command: &str,
     args: &[&str],
 ) -> Result<CommandRunResult, String> {
-    let output = Command::new(command)
+    let output = agent_command(command)
         .args(args)
         .current_dir(workspace)
         .output()
@@ -794,6 +958,8 @@ pub fn run() {
             list_sessions,
             start_agent_session,
             stop_agent_session,
+            get_settings,
+            update_settings,
             git_status,
             run_shell_command,
             list_workspace_files
@@ -1050,5 +1216,80 @@ mod tests {
             sessions.0.lock().expect("registry lock").is_empty(),
             "registry must be empty after kill_all_running"
         );
+    }
+
+    #[test]
+    fn merge_paths_keeps_primary_order_and_dedupes() {
+        let merged = merge_paths(
+            "/Users/me/.local/bin:/opt/homebrew/bin:/usr/bin",
+            "/usr/bin:/usr/sbin:/Users/me/.cargo/bin",
+        );
+        assert_eq!(
+            merged,
+            "/Users/me/.local/bin:/opt/homebrew/bin:/usr/bin:/usr/sbin:/Users/me/.cargo/bin"
+        );
+    }
+
+    #[test]
+    fn merge_paths_skips_empty_segments() {
+        assert_eq!(merge_paths(":/usr/bin::/bin:", "/usr/bin:/sbin"), "/usr/bin:/bin:/sbin");
+        assert_eq!(merge_paths("", "/usr/bin"), "/usr/bin");
+        assert_eq!(merge_paths("/usr/bin", ""), "/usr/bin");
+    }
+
+    #[test]
+    fn normalize_settings_drops_whitespace_overrides() {
+        let mut settings = HarnessSettings::default();
+        settings
+            .agent_commands
+            .insert("scidekick".to_string(), "   ".to_string());
+        settings
+            .agent_commands
+            .insert("acp".to_string(), "  /opt/acp  ".to_string());
+
+        let normalized = normalize_settings(settings);
+
+        assert!(
+            !normalized.agent_commands.contains_key("scidekick"),
+            "whitespace-only override must be dropped"
+        );
+        assert_eq!(
+            normalized.agent_commands.get("acp"),
+            Some(&"/opt/acp".to_string()),
+            "kept overrides must be trimmed"
+        );
+    }
+
+    #[test]
+    fn harness_store_back_compat_parses_without_settings() {
+        // Existing on-disk stores written before the settings field existed
+        // must still deserialize so users do not lose their workspaces on upgrade.
+        let json = r#"{"workspaces":[],"sessions":[]}"#;
+        let store: HarnessStore = serde_json::from_str(json).expect("parses legacy store");
+        assert_eq!(store.workspaces.len(), 0);
+        assert_eq!(store.sessions.len(), 0);
+        assert!(store.settings.agent_commands.is_empty());
+        assert!(store.settings.composer.selected_model.is_none());
+    }
+
+    #[test]
+    fn session_record_back_compat_parses_without_interrupted() {
+        // Records written before SessionRecord.interrupted existed must still
+        // load and default to false.
+        let json = r#"{
+            "id": "session-1",
+            "conversationId": "conv-1",
+            "agentId": "scidekick",
+            "workspacePath": "/tmp",
+            "prompt": "hi",
+            "stdout": "",
+            "stderr": "",
+            "exitCode": 0,
+            "startedAt": 1,
+            "finishedAt": 2,
+            "scidekickSessionId": null
+        }"#;
+        let record: SessionRecord = serde_json::from_str(json).expect("parses legacy record");
+        assert!(!record.interrupted);
     }
 }

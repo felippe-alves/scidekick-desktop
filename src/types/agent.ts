@@ -101,3 +101,21 @@ export interface ShellCommandRequest {
   command: string;
   args: string[];
 }
+
+export interface ComposerDefaults {
+  selectedAgentId?: string | null;
+  selectedModel?: string | null;
+  thinkingEffort?: string | null;
+  approvalMode?: string | null;
+  lastWorkspacePath?: string | null;
+}
+
+export interface HarnessSettings {
+  /** Per-agent binary path override. Absent or whitespace-only entries fall back to the registry default. */
+  agentCommands: Record<string, string>;
+  composer: ComposerDefaults;
+}
+
+export function emptyHarnessSettings(): HarnessSettings {
+  return { agentCommands: {}, composer: {} };
+}
