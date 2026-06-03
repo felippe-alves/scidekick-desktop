@@ -46,6 +46,7 @@ struct Workspace {
 #[serde(rename_all = "camelCase")]
 struct SessionRecord {
     id: String,
+    conversation_id: Option<String>,
     agent_id: String,
     workspace_path: String,
     prompt: String,
@@ -54,6 +55,7 @@ struct SessionRecord {
     exit_code: Option<i32>,
     started_at: u64,
     finished_at: u64,
+    scidekick_session_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -73,6 +75,8 @@ struct StartSessionRequest {
     args: Option<Vec<String>>,
     model: Option<String>,
     thinking_effort: Option<String>,
+    previous_scidekick_session_id: Option<String>,
+    conversation_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -118,6 +122,8 @@ struct SessionStarted {
     command: String,
     args: Vec<String>,
     started_at: u64,
+    scidekick_session_id: Option<String>,
+    conversation_id: String,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -260,6 +266,13 @@ fn start_agent_session(
     let session_id = make_id("session");
     let started_at = now_ms();
     let workspace_str = path_to_string(&workspace)?;
+    let conversation_id = request
+        .conversation_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| make_id("conversation"));
     let prompt_str = prompt.to_string();
 
     let mut child = Command::new(&command)
@@ -282,13 +295,46 @@ fn start_agent_session(
     let stdout_buf = Arc::new(Mutex::new(String::new()));
     let stderr_buf = Arc::new(Mutex::new(String::new()));
 
+    // Read the first stdout line synchronously — Scidekick emits the session header
+    // as { "type": "session", "id": "<uuid>", ... } before any agent events.
+    // We extract the session ID here so it can be returned in SessionStarted and
+    // later fed back as --resume <id> for multi-turn conversations.
+    let mut first_line_reader = BufReader::new(stdout);
+    let mut first_line = String::new();
+    let scidekick_session_id = if first_line_reader
+        .read_line(&mut first_line)
+        .is_ok()
+        && !first_line.is_empty()
+    {
+        stdout_buf
+            .lock()
+            .ok()
+            .map(|mut guard| guard.push_str(&first_line));
+        // Also emit the header as a stream event so the frontend's
+        // tryExtractSessionId can capture it (belt + suspenders).
+        let line = first_line.trim_end_matches('\n').to_string();
+        if !line.is_empty() {
+            let _ = app.emit(
+                "session-stream",
+                SessionStreamPayload {
+                    session_id: session_id.clone(),
+                    channel: "stdout",
+                    line,
+                },
+            );
+        }
+        extract_scidekick_session_id(&first_line)
+    } else {
+        None
+    };
     let stdout_thread = spawn_stream_reader(
         app.clone(),
         session_id.clone(),
         "stdout",
-        stdout,
+        first_line_reader,
         stdout_buf.clone(),
     );
+
     let stderr_thread = spawn_stream_reader(
         app.clone(),
         session_id.clone(),
@@ -301,9 +347,11 @@ fn start_agent_session(
     {
         let app = app.clone();
         let id = session_id.clone();
+        let conversation_id_persist = conversation_id.clone();
         let agent_id = request.agent_id.clone();
         let workspace_path = workspace_str.clone();
         let prompt_persist = prompt_str.clone();
+        let scidekick_session_id_persist = scidekick_session_id.clone();
         thread::spawn(move || {
             let exit_code = match child.wait() {
                 Ok(status) => status.code(),
@@ -321,9 +369,15 @@ fn start_agent_session(
                 .lock()
                 .map(|guard| guard.clone())
                 .unwrap_or_default();
+            let persisted_scidekick_session_id = scidekick_session_id_persist.or_else(|| {
+                stdout_text
+                    .lines()
+                    .find_map(extract_scidekick_session_id)
+            });
 
             let record = SessionRecord {
                 id: id.clone(),
+                conversation_id: Some(conversation_id_persist),
                 agent_id,
                 workspace_path,
                 prompt: prompt_persist,
@@ -332,6 +386,7 @@ fn start_agent_session(
                 exit_code,
                 started_at,
                 finished_at: now_ms(),
+                scidekick_session_id: persisted_scidekick_session_id,
             };
 
             if let Ok(mut store) = read_store(&app) {
@@ -360,6 +415,8 @@ fn start_agent_session(
         command,
         args,
         started_at,
+        scidekick_session_id,
+        conversation_id,
     })
 }
 
@@ -422,7 +479,21 @@ fn build_scidekick_args(request: &StartSessionRequest, prompt: &str) -> Vec<Stri
         "--mode".to_string(),
         "json".to_string(),
     ];
-    if let Some(model) = request.model.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(sid) = request
+        .previous_scidekick_session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        args.push("--resume".to_string());
+        args.push(sid.to_string());
+    }
+    if let Some(model) = request
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         args.push("--model".to_string());
         args.push(model.to_string());
     }
@@ -573,6 +644,18 @@ fn decode_lossy(bytes: Vec<u8>) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
+fn extract_scidekick_session_id(line: &str) -> Option<String> {
+    let parsed = serde_json::from_str::<serde_json::Value>(line.trim()).ok()?;
+    if parsed.get("type")?.as_str()? != "session" {
+        return None;
+    }
+    parsed
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_string)
+}
+
 fn spawn_stream_reader<R: std::io::Read + Send + 'static>(
     app: AppHandle,
     session_id: String,
@@ -656,6 +739,8 @@ mod tests {
             args: Some(vec!["bad".to_string()]),
             model: None,
             thinking_effort: None,
+            previous_scidekick_session_id: None,
+            conversation_id: None,
         };
         let (command, args) =
             command_for_session(&request, "inspect").expect("valid scidekick command");
@@ -673,12 +758,49 @@ mod tests {
             args: None,
             model: Some("opus".to_string()),
             thinking_effort: Some("high".to_string()),
+            previous_scidekick_session_id: None,
+            conversation_id: None,
         };
-        let (_, args) =
-            command_for_session(&request, "inspect").expect("valid scidekick command");
+        let (_, args) = command_for_session(&request, "inspect").expect("valid scidekick command");
         assert_eq!(
             args,
-            vec!["--print", "--mode", "json", "--model", "opus", "--thinking", "high", "inspect"]
+            vec![
+                "--print",
+                "--mode",
+                "json",
+                "--model",
+                "opus",
+                "--thinking",
+                "high",
+                "inspect"
+            ]
+        );
+    }
+
+    #[test]
+    fn scidekick_session_passes_resume_flag() {
+        let request = StartSessionRequest {
+            agent_id: "scidekick".to_string(),
+            workspace_path: ".".to_string(),
+            prompt: "ignored".to_string(),
+            command: None,
+            args: None,
+            model: None,
+            thinking_effort: None,
+            previous_scidekick_session_id: Some("01abcdef-1234-5678".to_string()),
+            conversation_id: None,
+        };
+        let (_, args) = command_for_session(&request, "followup").expect("valid");
+        assert_eq!(
+            args,
+            vec![
+                "--print",
+                "--mode",
+                "json",
+                "--resume",
+                "01abcdef-1234-5678",
+                "followup"
+            ]
         );
     }
 
@@ -692,6 +814,8 @@ mod tests {
             args: None,
             model: None,
             thinking_effort: None,
+            previous_scidekick_session_id: None,
+            conversation_id: None,
         };
         assert!(command_for_session(&request, "inspect").is_err());
     }
@@ -713,6 +837,21 @@ mod tests {
         assert_eq!(files[1].name, "README.md");
         assert_eq!(files[1].size, Some(5));
     }
+
+    #[test]
+    fn extracts_scidekick_session_id_with_json_spacing() {
+        assert_eq!(
+            extract_scidekick_session_id(
+                r#"{ "type": "session", "id": "01abcdef-1234-5678", "cwd": "/tmp" }"#
+            ),
+            Some("01abcdef-1234-5678".to_string())
+        );
+        assert_eq!(
+            extract_scidekick_session_id(r#"{ "type": "turn_start", "id": "nope" }"#),
+            None
+        );
+    }
+
     #[test]
     fn workspace_name_falls_back_for_root_paths() {
         assert_eq!(workspace_name(Path::new("/")), "Workspace");

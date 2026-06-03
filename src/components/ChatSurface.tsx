@@ -7,7 +7,7 @@ import type { SessionRecord, Workspace } from "../types/agent";
 
 interface ChatSurfaceProps {
   activeWorkspace: Workspace | null;
-  activeSession: SessionRecord | null;
+  activeSessions: SessionRecord[];
   runningSession: RunningSession | null;
   busy: boolean;
   error: string | null;
@@ -18,7 +18,7 @@ interface ChatSurfaceProps {
 
 export function ChatSurface({
   activeWorkspace,
-  activeSession,
+  activeSessions,
   runningSession,
   error,
   loading,
@@ -33,17 +33,22 @@ export function ChatSurface({
     const fromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     if (fromBottom < 200) el.scrollTop = el.scrollHeight;
   }, [
+    activeSessions.length,
     runningSession?.events.length,
     runningSession?.stdout,
     runningSession?.stderr,
     runningSession?.id,
   ]);
 
-  const showRunning = !!runningSession;
-  const showCompleted = !showRunning && !!activeSession;
-  const showWelcome = !loading && !showRunning && !showCompleted;
+  const completedTurns = useMemo(
+    () => [...activeSessions].sort((a, b) => a.startedAt - b.startedAt),
+    [activeSessions],
+  );
+  const showCompleted = completedTurns.length > 0;
+  const showWelcome = !loading && !runningSession && !showCompleted;
 
-  const headerSubtitle = runningSession?.prompt ?? activeSession?.prompt ?? "New chat";
+  const headerSubtitle =
+    completedTurns[0]?.prompt ?? runningSession?.prompt ?? "New chat";
 
   return (
     <section className="chat-island island">
@@ -58,18 +63,20 @@ export function ChatSurface({
 
       <div className="chat-scroll" ref={scrollRef}>
         {loading ? <LoadingState /> : null}
-        {showRunning ? (
+        {showCompleted ? completedTurns.map((session) => (
+          <CompletedSession key={session.id} session={session} />
+        )) : null}
+        {runningSession ? (
           <Transcript
-            prompt={runningSession!.prompt}
-            agentId={runningSession!.agentId}
-            stdout={runningSession!.stdout}
-            stderr={runningSession!.stderr}
-            events={runningSession!.events}
+            prompt={runningSession.prompt}
+            agentId={runningSession.agentId}
+            stdout={runningSession.stdout}
+            stderr={runningSession.stderr}
+            events={runningSession.events}
             status="running"
             exitCode={null}
           />
         ) : null}
-        {showCompleted ? <CompletedSession session={activeSession!} /> : null}
         {showWelcome ? (
           <WelcomeState activeWorkspace={activeWorkspace} onPickWorkspace={onPickWorkspace} />
         ) : null}

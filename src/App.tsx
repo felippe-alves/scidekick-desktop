@@ -42,6 +42,8 @@ export interface RunningSession {
   stdout: string;
   stderr: string;
   events: SkEvent[];
+  scidekickSessionId: string | null;
+  conversationId: string;
 }
 
 const SCIDEKICK_PROBE_ARGS = ["--version"] as const;
@@ -57,11 +59,11 @@ export function App() {
   const [workspacePath, setWorkspacePath] = useState("");
   const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
-  const [activeSession, setActiveSession] = useState<SessionRecord | null>(null);
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [runningSession, setRunningSession] = useState<RunningSession | null>(null);
   const runningSessionRef = useRef<RunningSession | null>(null);
   const pendingStreamsRef = useRef<
-    Map<string, { stdout: string; stderr: string; events: SkEvent[] }>
+    Map<string, { stdout: string; stderr: string; events: SkEvent[]; scidekickSessionId: string | null }>
   >(new Map());
   const [git, setGit] = useState<CommandRunResult | null>(null);
   const [commandLine, setCommandLine] = useState("pwd");
@@ -74,6 +76,7 @@ export function App() {
   const [permissionMode, setPermissionMode] = useState<PermissionMode>("default");
   const [thinkingEffort, setThinkingEffort] = useState<string>("default");
   const [selectedModel, setSelectedModel] = useState<string>("default");
+  const [activeScidekickSessionId, setActiveScidekickSessionId] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -88,6 +91,12 @@ export function App() {
     () => workspaces.find((workspace) => workspace.path === workspacePath) ?? null,
     [workspacePath, workspaces],
   );
+
+  const activeConversationSessions = useMemo(() => {
+    if (!activeConversationId) return [];
+    return sessions.filter((session) => conversationIdForSession(session) === activeConversationId);
+  }, [activeConversationId, sessions]);
+
 
   useEffect(() => {
     let cancelled = false;
@@ -111,7 +120,8 @@ export function App() {
       await safeCall("listSessions", listSessions, (value) => {
         if (cancelled) return;
         setSessions(value);
-        setActiveSession(value[0] ?? null);
+        setActiveConversationId(value[0] ? conversationIdForSession(value[0]) : null);
+        setActiveScidekickSessionId(value[0] ? scidekickSessionIdForSession(value[0]) : null);
       });
 
       if (cancelled) return;
@@ -179,10 +189,14 @@ export function App() {
             stdout: "",
             stderr: "",
             events: [],
+            scidekickSessionId: null,
           };
-          let parsedEvent: SkEvent | null = null;
           if (payload.channel === "stdout") {
-            parsedEvent = parseSkEvent(payload.line);
+            const headerId = tryExtractSessionId(payload.line);
+            if (headerId && !pending.scidekickSessionId) {
+              pending.scidekickSessionId = headerId;
+            }
+            const parsedEvent = parseSkEvent(payload.line);
             if (parsedEvent) {
               pending.events = [...pending.events, parsedEvent];
             } else {
@@ -200,6 +214,8 @@ export function App() {
               stdout: pending.stdout,
               stderr: pending.stderr,
               events: pending.events,
+              scidekickSessionId:
+                pending.scidekickSessionId ?? current.scidekickSessionId,
             };
             runningSessionRef.current = next;
             return next;
@@ -207,12 +223,21 @@ export function App() {
         });
         const complete = await listenSessionComplete((payload) => {
           pendingStreamsRef.current.delete(payload.sessionId);
-          setActiveSession(payload.record);
           setRunningSession((current) => {
             if (!current || current.id !== payload.sessionId) return current;
+            setActiveConversationId(
+              payload.record.conversationId ?? current.conversationId,
+            );
+            setActiveScidekickSessionId(
+              payload.record.scidekickSessionId ?? current.scidekickSessionId,
+            );
             runningSessionRef.current = null;
             return null;
           });
+          setSessions((current) => [
+            payload.record,
+            ...current.filter((session) => session.id !== payload.record.id),
+          ]);
           void listSessions().then(setSessions).catch(() => {});
         });
 
@@ -271,12 +296,15 @@ export function App() {
     if (prompt.trim() === "") return;
 
     const sentPrompt = prompt;
+    const isScidekick = selectedAgent.id === "scidekick";
+    const followUpSid =
+      isScidekick && activeScidekickSessionId ? activeScidekickSessionId : undefined;
+    const conversationId = activeConversationId ?? undefined;
+
     setError(null);
-    setActiveSession(null);
     setPrompt("");
 
     try {
-      const isScidekick = selectedAgent.id === "scidekick";
       const started = await startAgentSession({
         agentId: selectedAgent.id,
         workspacePath,
@@ -286,11 +314,14 @@ export function App() {
         model: isScidekick && selectedModel !== "default" ? selectedModel : undefined,
         thinkingEffort:
           isScidekick && thinkingEffort !== "default" ? thinkingEffort : undefined,
+        previousScidekickSessionId: followUpSid,
+        conversationId,
       });
       const pending = pendingStreamsRef.current.get(started.id) ?? {
         stdout: "",
         stderr: "",
         events: [] as SkEvent[],
+        scidekickSessionId: null as string | null,
       };
       const next: RunningSession = {
         id: started.id,
@@ -298,12 +329,19 @@ export function App() {
         agentId: started.agentId,
         workspacePath: started.workspacePath,
         startedAt: started.startedAt,
+        conversationId: started.conversationId,
         stdout: pending.stdout,
         stderr: pending.stderr,
         events: pending.events,
+        scidekickSessionId:
+          pending.scidekickSessionId ?? started.scidekickSessionId,
       };
       runningSessionRef.current = next;
       setRunningSession(next);
+      setActiveConversationId(started.conversationId);
+      setActiveScidekickSessionId(
+        next.scidekickSessionId ?? activeScidekickSessionId,
+      );
     } catch (err) {
       console.error("[scidekick-desktop] startAgentSession failed:", err);
       setError(readError(err));
@@ -381,7 +419,7 @@ export function App() {
         workspaces={workspaces}
         sessions={sessions}
         activeWorkspace={activeWorkspace}
-        activeSession={activeSession}
+        activeConversationId={activeConversationId}
         workspacePath={workspacePath}
         busy={busy}
         health={health}
@@ -391,9 +429,13 @@ export function App() {
         onPickWorkspace={handlePickWorkspace}
         onSelectWorkspace={setWorkspacePath}
         onRemoveWorkspace={handleRemoveWorkspace}
-        onSelectSession={setActiveSession}
+        onSelectSession={(session) => {
+          setActiveConversationId(conversationIdForSession(session));
+          setActiveScidekickSessionId(scidekickSessionIdForSession(session));
+        }}
         onNewChat={() => {
-          setActiveSession(null);
+          setActiveConversationId(null);
+          setActiveScidekickSessionId(null);
           setPrompt(DEFAULT_PROMPT);
         }}
       />
@@ -401,7 +443,7 @@ export function App() {
       <section className={bottomTools.length > 0 ? "workspace-area with-bottom-dock" : "workspace-area"}>
         <ChatSurface
           activeWorkspace={activeWorkspace}
-          activeSession={activeSession}
+          activeSessions={activeConversationSessions}
           runningSession={runningSession}
           busy={busy}
           error={error}
@@ -462,4 +504,37 @@ export function App() {
       </section>
     </main>
   );
+}
+
+function conversationIdForSession(session: SessionRecord): string {
+  return session.conversationId ?? session.id;
+}
+
+function scidekickSessionIdForSession(session: SessionRecord): string | null {
+  if (session.agentId !== "scidekick") return null;
+  if (session.scidekickSessionId) return session.scidekickSessionId;
+  for (const line of session.stdout.split("\n")) {
+    const id = tryExtractSessionId(line);
+    if (id) return id;
+  }
+  return null;
+}
+/**
+ * Try to extract the Scidekick session ID from a JSON line that looks like
+ * {"type":"session","id":"<uuid>",...}. Returns the ID string or null.
+ */
+function tryExtractSessionId(line: string): string | null {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("{")) return null;
+  // Quick check before parsing — avoid JSON.parse for non-matching lines
+  if (!trimmed.includes('"session"')) return null;
+  try {
+    const obj = JSON.parse(trimmed) as { type?: unknown; id?: unknown };
+    if (obj.type === "session" && typeof obj.id === "string" && obj.id.length > 8) {
+      return obj.id;
+    }
+  } catch {
+    // not valid JSON
+  }
+  return null;
 }

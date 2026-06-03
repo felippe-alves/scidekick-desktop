@@ -15,7 +15,7 @@ interface AppSidebarProps {
   workspaces: Workspace[];
   sessions: SessionRecord[];
   activeWorkspace: Workspace | null;
-  activeSession: SessionRecord | null;
+  activeConversationId: string | null;
   workspacePath: string;
   busy: boolean;
   health: HarnessHealth | null;
@@ -33,7 +33,7 @@ export function AppSidebar({
   workspaces,
   sessions,
   activeWorkspace,
-  activeSession,
+  activeConversationId,
   workspacePath,
   busy,
   health,
@@ -46,6 +46,7 @@ export function AppSidebar({
   onSelectSession,
   onNewChat,
 }: AppSidebarProps) {
+  const conversations = conversationSummaries(sessions);
   return (
     <aside className="app-sidebar">
       <div className="sidebar-titlebar">
@@ -94,7 +95,7 @@ export function AppSidebar({
               >
                 <FolderOpen size={14} />
                 <span>{workspace.name}</span>
-                <small>{sessionCountForWorkspace(sessions, workspace.path)}</small>
+                <small>{conversationCountForWorkspace(sessions, workspace.path)}</small>
               </button>
               <div className="project-hover-actions">
                 <button type="button" title="New chat" onClick={onNewChat}><SquarePen size={12} /></button>
@@ -107,25 +108,28 @@ export function AppSidebar({
         <section className="project-block nested">
           <div className="sidebar-heading">
             <span>Chats</span>
-            <small>{sessions.length}</small>
+            <small>{conversations.length}</small>
           </div>
           {activeWorkspace ? <div className="branch-chip"><GitBranch size={11} /> main</div> : null}
-          {sessions.map((session, index) => (
+          {conversations.map((conversation, index) => (
             <button
-              className={session.id === activeSession?.id ? "session-row active" : "session-row"}
-              key={session.id}
-              onClick={() => onSelectSession(session)}
+              className={conversation.id === activeConversationId ? "session-row active" : "session-row"}
+              key={conversation.id}
+              onClick={() => onSelectSession(conversation.latest)}
               type="button"
             >
               <span className="session-agent-icon"><Bot size={12} /></span>
               <span className="session-text">
-                <strong>{session.prompt || `Session ${index + 1}`}</strong>
-                <small>{session.agentId}</small>
+                <strong>{conversation.title || `Chat ${index + 1}`}</strong>
+                <small>
+                  {conversation.latest.agentId}
+                  {conversation.turns > 1 ? ` · ${conversation.turns} turns` : ""}
+                </small>
               </span>
               <MoreHorizontal className="row-more" size={13} />
             </button>
           ))}
-          {sessions.length === 0 ? <p className="sidebar-empty">No chats yet.</p> : null}
+          {conversations.length === 0 ? <p className="sidebar-empty">No chats yet.</p> : null}
         </section>
       </div>
 
@@ -139,8 +143,47 @@ export function AppSidebar({
   );
 }
 
-function sessionCountForWorkspace(sessions: SessionRecord[], path: string): number {
-  let count = 0;
-  for (const session of sessions) if (session.workspacePath === path) count += 1;
-  return count;
+interface ConversationSummary {
+  id: string;
+  title: string;
+  latest: SessionRecord;
+  earliestStartedAt: number;
+  turns: number;
+}
+
+function conversationSummaries(sessions: SessionRecord[]): ConversationSummary[] {
+  const byId = new Map<string, ConversationSummary>();
+  for (const session of sessions) {
+    const id = conversationIdForSession(session);
+    const existing = byId.get(id);
+    if (!existing) {
+      byId.set(id, {
+        id,
+        title: session.prompt,
+        latest: session,
+        earliestStartedAt: session.startedAt,
+        turns: 1,
+      });
+      continue;
+    }
+    existing.turns += 1;
+    if (session.startedAt > existing.latest.startedAt) existing.latest = session;
+    if (session.startedAt < existing.earliestStartedAt) {
+      existing.earliestStartedAt = session.startedAt;
+      existing.title = session.prompt;
+    }
+  }
+  return [...byId.values()].sort((a, b) => b.latest.startedAt - a.latest.startedAt);
+}
+
+function conversationCountForWorkspace(sessions: SessionRecord[], path: string): number {
+  const ids = new Set<string>();
+  for (const session of sessions) {
+    if (session.workspacePath === path) ids.add(conversationIdForSession(session));
+  }
+  return ids.size;
+}
+
+function conversationIdForSession(session: SessionRecord): string {
+  return session.conversationId ?? session.id;
 }

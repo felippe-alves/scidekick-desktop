@@ -47,10 +47,13 @@ export interface StartSessionRequest {
   args?: string[];
   model?: string;
   thinkingEffort?: string;
+  previousScidekickSessionId?: string;
+  conversationId?: string;
 }
 
 export interface SessionRecord {
   id: string;
+  conversationId?: string | null;
   agentId: string;
   workspacePath: string;
   prompt: string;
@@ -59,6 +62,7 @@ export interface SessionRecord {
   exitCode: number | null;
   startedAt: number;
   finishedAt: number;
+  scidekickSessionId?: string | null;
 }
 
 export interface SessionStarted {
@@ -69,6 +73,8 @@ export interface SessionStarted {
   command: string;
   args: string[];
   startedAt: number;
+  scidekickSessionId: string | null;
+  conversationId: string;
 }
 
 export interface SessionStreamPayload {
