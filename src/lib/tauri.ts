@@ -48,6 +48,10 @@ export function startAgentSession(request: StartSessionRequest): Promise<Session
   return invoke("start_agent_session", { request });
 }
 
+export function stopAgentSession(sessionId: string): Promise<boolean> {
+  return invoke("stop_agent_session", { sessionId });
+}
+
 export function listenSessionStream(
   handler: (event: SessionStreamPayload) => void,
 ): Promise<UnlistenFn> {

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef } from "react";
-import { Brain, FolderOpen, Hammer, Terminal } from "lucide-react";
+import { Brain, FolderOpen, Hammer, Square, Terminal } from "lucide-react";
 import { stripAnsi } from "../lib/commandLine";
 import { parseSkEvent, type SkContent, type SkEvent, type SkMessage } from "../types/scidekick";
 import type { RunningSession } from "../App";
@@ -12,7 +12,9 @@ interface ChatSurfaceProps {
   busy: boolean;
   error: string | null;
   loading?: boolean;
+  stopping?: boolean;
   onPickWorkspace: () => void;
+  onStop?: () => void;
   children: React.ReactNode;
 }
 
@@ -22,7 +24,9 @@ export function ChatSurface({
   runningSession,
   error,
   loading,
+  stopping,
   onPickWorkspace,
+  onStop,
   children,
 }: ChatSurfaceProps) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -75,6 +79,9 @@ export function ChatSurface({
             events={runningSession.events}
             status="running"
             exitCode={null}
+            interrupted={false}
+            stopping={stopping}
+            onStop={onStop}
           />
         ) : null}
         {showWelcome ? (
@@ -146,6 +153,7 @@ function CompletedSession({ session }: { session: SessionRecord }) {
       events={events}
       status={(session.exitCode ?? 0) === 0 ? "complete" : "error"}
       exitCode={session.exitCode}
+      interrupted={session.interrupted ?? false}
     />
   );
 }
@@ -158,6 +166,9 @@ interface TranscriptProps {
   events: SkEvent[];
   status: "running" | "complete" | "error";
   exitCode: number | null;
+  interrupted: boolean;
+  stopping?: boolean;
+  onStop?: () => void;
 }
 
 function Transcript({
@@ -168,6 +179,9 @@ function Transcript({
   events,
   status,
   exitCode,
+  interrupted,
+  stopping,
+  onStop,
 }: TranscriptProps) {
   const cleanStdout = stripAnsi(stdout);
   const cleanStderr = stripAnsi(stderr);
@@ -196,7 +210,25 @@ function Transcript({
           {isRunning ? (
             <div className="running-indicator">
               <span className="caret" />
-              <span>{turn.assistantMessages.length === 0 ? "Thinking" : "Working"}</span>
+              <span>
+                {stopping
+                  ? "Stopping…"
+                  : turn.assistantMessages.length === 0
+                    ? "Thinking"
+                    : "Working"}
+              </span>
+              {onStop ? (
+                <button
+                  type="button"
+                  className="stop-button"
+                  onClick={onStop}
+                  disabled={stopping}
+                  aria-label="Stop running session"
+                >
+                  <Square size={11} strokeWidth={2.2} />
+                  <span>{stopping ? "Stopping" : "Stop"}</span>
+                </button>
+              ) : null}
             </div>
           ) : null}
 
@@ -220,6 +252,12 @@ function Transcript({
               <span>{agentId}</span>
               <span>·</span>
               <span>exit {exitCode ?? "?"}</span>
+              {interrupted ? (
+                <>
+                  <span>·</span>
+                  <span className="agent-footer-flag">interrupted</span>
+                </>
+              ) : null}
             </div>
           ) : null}
         </div>

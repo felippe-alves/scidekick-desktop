@@ -63,6 +63,7 @@ export interface SessionRecord {
   startedAt: number;
   finishedAt: number;
   scidekickSessionId?: string | null;
+  interrupted?: boolean;
 }
 
 export interface SessionStarted {

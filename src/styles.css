@@ -668,6 +668,17 @@ code { color: var(--accent-soft); overflow-wrap: anywhere; }
   color: var(--text-faint);
   font-size: 0.78rem;
 }
+.running-indicator .stop-button {
+  margin-inline-start: 0.55rem;
+  height: 1.5rem;
+  padding: 0 0.55rem;
+  border: 1px solid oklch(1 0 0 / 0.08);
+  font-size: 0.74rem;
+}
+.running-indicator .stop-button[disabled] {
+  opacity: 0.55;
+  cursor: progress;
+}
 .running-indicator .caret {
   display: inline-block;
   width: 0.5rem;
@@ -692,6 +703,11 @@ code { color: var(--accent-soft); overflow-wrap: anywhere; }
   font-size: 0.72rem;
 }
 .agent-message.error .agent-footer { color: var(--danger); }
+.agent-footer-flag {
+  color: var(--danger);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
 
 .turn-divider { display: none; }
 

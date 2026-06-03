@@ -20,6 +20,7 @@ import {
   removeWorkspace,
   runShellCommand,
   startAgentSession,
+  stopAgentSession,
 } from "./lib/tauri";
 import type {
   AgentDefinition,
@@ -79,6 +80,7 @@ export function App() {
   const [activeScidekickSessionId, setActiveScidekickSessionId] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
+  const [stoppingSessionId, setStoppingSessionId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -223,6 +225,7 @@ export function App() {
         });
         const complete = await listenSessionComplete((payload) => {
           pendingStreamsRef.current.delete(payload.sessionId);
+          setStoppingSessionId((current) => (current === payload.sessionId ? null : current));
           setRunningSession((current) => {
             if (!current || current.id !== payload.sessionId) return current;
             setActiveConversationId(
@@ -349,6 +352,23 @@ export function App() {
     }
   }
 
+  async function handleStopSession() {
+    const current = runningSessionRef.current;
+    if (!current) return;
+    if (stoppingSessionId === current.id) return;
+    setStoppingSessionId(current.id);
+    try {
+      await stopAgentSession(current.id);
+      // We do not clear runningSession here — the wait thread still has to
+      // drain stdio and emit session-complete with the final SessionRecord
+      // (interrupted: true). The existing listener clears runningSession.
+    } catch (err) {
+      console.error("[scidekick-desktop] stopAgentSession failed:", err);
+      setError(readError(err));
+      setStoppingSessionId(null);
+    }
+  }
+
   async function handleGitStatus() {
     if (!workspacePath) return;
     await runBusy(async () => {
@@ -448,6 +468,8 @@ export function App() {
           busy={busy}
           error={error}
           loading={loading}
+          stopping={stoppingSessionId !== null && runningSession?.id === stoppingSessionId}
+          onStop={handleStopSession}
           onPickWorkspace={handlePickWorkspace}
         >
           <Composer

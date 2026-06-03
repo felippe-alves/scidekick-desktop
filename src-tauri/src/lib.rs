@@ -1,13 +1,15 @@
 use serde::{Deserialize, Serialize};
+use shared_child::SharedChild;
+use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, State};
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -56,6 +58,8 @@ struct SessionRecord {
     started_at: u64,
     finished_at: u64,
     scidekick_session_id: Option<String>,
+    #[serde(default)]
+    interrupted: bool,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -139,6 +143,66 @@ struct SessionStreamPayload {
 struct SessionCompletePayload {
     session_id: String,
     record: SessionRecord,
+}
+
+/// Per-session handle held while a child is alive: shared so the wait thread
+/// can `wait()` and the stop command can `kill()` concurrently, plus a flag
+/// the stop command flips so the wait thread can mark the persisted record.
+struct RunningChild {
+    child: Arc<SharedChild>,
+    stop_requested: Arc<AtomicBool>,
+}
+
+#[derive(Default)]
+struct RunningSessions(Mutex<HashMap<String, RunningChild>>);
+
+fn register_running(
+    sessions: &RunningSessions,
+    session_id: &str,
+    entry: RunningChild,
+) -> Result<(), String> {
+    let mut map = sessions
+        .0
+        .lock()
+        .map_err(|err| format!("failed to lock session registry: {err}"))?;
+    map.insert(session_id.to_string(), entry);
+    Ok(())
+}
+
+/// Removes a running session from the registry, sets its stop flag, and kills
+/// the child. Returns `Ok(true)` if a live entry was found, `Ok(false)` if no
+/// session is currently registered under `session_id` (so callers can treat a
+/// double-click on Stop or a stop-after-natural-exit as a no-op).
+fn stop_running(sessions: &RunningSessions, session_id: &str) -> Result<bool, String> {
+    let entry = {
+        let mut map = sessions
+            .0
+            .lock()
+            .map_err(|err| format!("failed to lock session registry: {err}"))?;
+        map.remove(session_id)
+    };
+    let Some(entry) = entry else {
+        return Ok(false);
+    };
+    entry.stop_requested.store(true, Ordering::SeqCst);
+    entry
+        .child
+        .kill()
+        .map_err(|err| format!("failed to stop session {session_id}: {err}"))?;
+    Ok(true)
+}
+
+/// Best-effort shutdown of every live child. Used on app exit so we do not
+/// leak Scidekick processes behind the harness.
+fn kill_all_running(sessions: &RunningSessions) {
+    let entries: Vec<RunningChild> = match sessions.0.lock() {
+        Ok(mut map) => map.drain().map(|(_, entry)| entry).collect(),
+        Err(_) => return,
+    };
+    for entry in entries {
+        entry.stop_requested.store(true, Ordering::SeqCst);
+        let _ = entry.child.kill();
+    }
 }
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -254,6 +318,7 @@ fn list_sessions(app: AppHandle) -> Result<Vec<SessionRecord>, String> {
 #[tauri::command]
 fn start_agent_session(
     app: AppHandle,
+    sessions: State<RunningSessions>,
     request: StartSessionRequest,
 ) -> Result<SessionStarted, String> {
     let workspace = canonical_workspace_path(&request.workspace_path)?;
@@ -262,7 +327,7 @@ fn start_agent_session(
         return Err("Prompt is required".to_string());
     }
 
-    let (command, args) = command_for_session(&request, prompt)?;
+    let (command_str, args) = command_for_session(&request, prompt)?;
     let session_id = make_id("session");
     let started_at = now_ms();
     let workspace_str = path_to_string(&workspace)?;
@@ -275,22 +340,32 @@ fn start_agent_session(
         .unwrap_or_else(|| make_id("conversation"));
     let prompt_str = prompt.to_string();
 
-    let mut child = Command::new(&command)
-        .args(&args)
+    let mut cmd = Command::new(&command_str);
+    cmd.args(&args)
         .current_dir(&workspace)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|err| format!("failed to start {command}: {err}"))?;
+        .stderr(Stdio::piped());
 
-    let stdout = child
-        .stdout
-        .take()
+    let shared = SharedChild::spawn(&mut cmd)
+        .map_err(|err| format!("failed to start {command_str}: {err}"))?;
+    let stdout = shared
+        .take_stdout()
         .ok_or_else(|| "process stdout pipe missing".to_string())?;
-    let stderr = child
-        .stderr
-        .take()
+    let stderr = shared
+        .take_stderr()
         .ok_or_else(|| "process stderr pipe missing".to_string())?;
+    let child = Arc::new(shared);
+    let stop_requested = Arc::new(AtomicBool::new(false));
+
+    // Register before any blocking IO so a fast stop can find the child.
+    register_running(
+        sessions.inner(),
+        &session_id,
+        RunningChild {
+            child: child.clone(),
+            stop_requested: stop_requested.clone(),
+        },
+    )?;
 
     let stdout_buf = Arc::new(Mutex::new(String::new()));
     let stderr_buf = Arc::new(Mutex::new(String::new()));
@@ -352,14 +427,23 @@ fn start_agent_session(
         let workspace_path = workspace_str.clone();
         let prompt_persist = prompt_str.clone();
         let scidekick_session_id_persist = scidekick_session_id.clone();
+        let child_for_wait = child.clone();
+        let stop_flag = stop_requested.clone();
         thread::spawn(move || {
-            let exit_code = match child.wait() {
+            let exit_code = match child_for_wait.wait() {
                 Ok(status) => status.code(),
                 Err(_) => None,
             };
             // ensure all output is drained
             let _ = stdout_thread.join();
             let _ = stderr_thread.join();
+
+            // Drop our entry if a natural exit beat any pending stop request.
+            if let Some(state) = app.try_state::<RunningSessions>() {
+                if let Ok(mut map) = state.0.lock() {
+                    map.remove(&id);
+                }
+            }
 
             let stdout_text = stdout_buf
                 .lock()
@@ -387,6 +471,7 @@ fn start_agent_session(
                 started_at,
                 finished_at: now_ms(),
                 scidekick_session_id: persisted_scidekick_session_id,
+                interrupted: stop_flag.load(Ordering::SeqCst),
             };
 
             if let Ok(mut store) = read_store(&app) {
@@ -412,12 +497,20 @@ fn start_agent_session(
         agent_id: request.agent_id,
         workspace_path: workspace_str,
         prompt: prompt_str,
-        command,
+        command: command_str,
         args,
         started_at,
         scidekick_session_id,
         conversation_id,
     })
+}
+
+#[tauri::command]
+fn stop_agent_session(
+    sessions: State<RunningSessions>,
+    session_id: String,
+) -> Result<bool, String> {
+    stop_running(sessions.inner(), &session_id)
 }
 
 #[tauri::command]
@@ -688,7 +781,8 @@ fn spawn_stream_reader<R: std::io::Read + Send + 'static>(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
+        .manage(RunningSessions::default())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             list_supported_agents,
@@ -699,12 +793,21 @@ pub fn run() {
             remove_workspace,
             list_sessions,
             start_agent_session,
+            stop_agent_session,
             git_status,
             run_shell_command,
             list_workspace_files
         ])
-        .run(tauri::generate_context!())
-        .expect("failed to run Scidekick Desktop");
+        .build(tauri::generate_context!())
+        .expect("failed to build Scidekick Desktop");
+
+    app.run(|app_handle, event| {
+        if let RunEvent::ExitRequested { .. } = event {
+            if let Some(state) = app_handle.try_state::<RunningSessions>() {
+                kill_all_running(state.inner());
+            }
+        }
+    });
 }
 
 #[cfg(test)]
@@ -855,5 +958,97 @@ mod tests {
     #[test]
     fn workspace_name_falls_back_for_root_paths() {
         assert_eq!(workspace_name(Path::new("/")), "Workspace");
+    }
+
+    /// Spawn a long-lived child for use in registry tests. Returns the
+    /// SharedChild plus the stop-flag we register alongside it.
+    fn spawn_test_child(secs: u32) -> (Arc<SharedChild>, Arc<AtomicBool>) {
+        let mut cmd = Command::new("sleep");
+        cmd.arg(secs.to_string());
+        cmd.stdout(Stdio::null()).stderr(Stdio::null());
+        let shared = SharedChild::spawn(&mut cmd).expect("spawn sleep");
+        (Arc::new(shared), Arc::new(AtomicBool::new(false)))
+    }
+
+    /// Bounded wait so a runaway test cannot hang CI.
+    fn wait_until_exit(child: &SharedChild) -> std::process::ExitStatus {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Some(status) = child.try_wait().expect("try_wait") {
+                return status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                panic!("child did not exit within 5s after stop");
+            }
+            thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+
+    #[test]
+    fn stop_running_kills_registered_child() {
+        let sessions = RunningSessions::default();
+        let (child, stop_flag) = spawn_test_child(30);
+        let id = "stop-test-1";
+        register_running(
+            &sessions,
+            id,
+            RunningChild {
+                child: child.clone(),
+                stop_requested: stop_flag.clone(),
+            },
+        )
+        .expect("register");
+
+        assert!(stop_running(&sessions, id).expect("stop ok"));
+        assert!(stop_flag.load(Ordering::SeqCst));
+
+        let status = wait_until_exit(&child);
+        assert!(!status.success(), "killed child must not report success");
+
+        // Registry entry is gone; a second stop is a no-op.
+        assert!(!stop_running(&sessions, id).expect("second stop ok"));
+    }
+
+    #[test]
+    fn stop_running_is_noop_when_session_missing() {
+        let sessions = RunningSessions::default();
+        assert!(!stop_running(&sessions, "no-such-session").expect("no panic"));
+    }
+
+    #[test]
+    fn kill_all_running_drains_registry() {
+        let sessions = RunningSessions::default();
+        let (child_a, flag_a) = spawn_test_child(30);
+        let (child_b, flag_b) = spawn_test_child(30);
+        register_running(
+            &sessions,
+            "drain-a",
+            RunningChild {
+                child: child_a.clone(),
+                stop_requested: flag_a.clone(),
+            },
+        )
+        .expect("register a");
+        register_running(
+            &sessions,
+            "drain-b",
+            RunningChild {
+                child: child_b.clone(),
+                stop_requested: flag_b.clone(),
+            },
+        )
+        .expect("register b");
+
+        kill_all_running(&sessions);
+
+        assert!(flag_a.load(Ordering::SeqCst));
+        assert!(flag_b.load(Ordering::SeqCst));
+        wait_until_exit(&child_a);
+        wait_until_exit(&child_b);
+        assert!(
+            sessions.0.lock().expect("registry lock").is_empty(),
+            "registry must be empty after kill_all_running"
+        );
     }
 }
