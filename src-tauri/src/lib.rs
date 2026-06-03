@@ -109,6 +109,14 @@ struct StartSessionRequest {
     args: Option<Vec<String>>,
     model: Option<String>,
     thinking_effort: Option<String>,
+    /// sk's --approval-mode: `always-ask | write | yolo`. `None` or
+    /// `"default"` leaves sk's own `tools.approvalMode` config in charge.
+    #[serde(default)]
+    approval_mode: Option<String>,
+    /// Absolute paths the user attached for this turn. Wired into sk as
+    /// `@<path>` positional tokens preceding the prompt.
+    #[serde(default)]
+    attachments: Option<Vec<String>>,
     previous_scidekick_session_id: Option<String>,
     conversation_id: Option<String>,
 }
@@ -763,6 +771,29 @@ fn build_scidekick_args(request: &StartSessionRequest, prompt: &str) -> Vec<Stri
         args.push("--thinking".to_string());
         args.push(effort.to_string());
     }
+    // sk treats unset --approval-mode as "use config default". We only emit
+    // the flag for real values to keep the user's persisted tools.approvalMode
+    // working when no harness-side override is set.
+    if let Some(mode) = request
+        .approval_mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "default")
+    {
+        args.push("--approval-mode".to_string());
+        args.push(mode.to_string());
+    }
+    // Attachments are positional `@<path>` tokens placed immediately before
+    // the prompt (matching `scidekick @prompt.md @image.png "What color?"`).
+    if let Some(attachments) = request.attachments.as_deref() {
+        for path in attachments {
+            let trimmed = path.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            args.push(format!("@{trimmed}"));
+        }
+    }
     args.push(prompt.to_string());
     args
 }
@@ -998,19 +1029,27 @@ mod tests {
         assert_eq!(expand_prompt_args(&[], "two words"), vec!["two words"]);
     }
 
-    #[test]
-    fn scidekick_session_uses_json_print_mode() {
-        let request = StartSessionRequest {
-            agent_id: "scidekick".to_string(),
+    fn scidekick_request_fixture(agent_id: &str) -> StartSessionRequest {
+        StartSessionRequest {
+            agent_id: agent_id.to_string(),
             workspace_path: ".".to_string(),
             prompt: "ignored".to_string(),
-            command: Some("other".to_string()),
-            args: Some(vec!["bad".to_string()]),
+            command: None,
+            args: None,
             model: None,
             thinking_effort: None,
+            approval_mode: None,
+            attachments: None,
             previous_scidekick_session_id: None,
             conversation_id: None,
-        };
+        }
+    }
+
+    #[test]
+    fn scidekick_session_uses_json_print_mode() {
+        let mut request = scidekick_request_fixture("scidekick");
+        request.command = Some("other".to_string());
+        request.args = Some(vec!["bad".to_string()]);
         let (command, args) =
             command_for_session(&request, "inspect").expect("valid scidekick command");
         assert_eq!(command, "sk");
@@ -1019,17 +1058,9 @@ mod tests {
 
     #[test]
     fn scidekick_session_includes_model_and_effort() {
-        let request = StartSessionRequest {
-            agent_id: "scidekick".to_string(),
-            workspace_path: ".".to_string(),
-            prompt: "ignored".to_string(),
-            command: None,
-            args: None,
-            model: Some("opus".to_string()),
-            thinking_effort: Some("high".to_string()),
-            previous_scidekick_session_id: None,
-            conversation_id: None,
-        };
+        let mut request = scidekick_request_fixture("scidekick");
+        request.model = Some("opus".to_string());
+        request.thinking_effort = Some("high".to_string());
         let (_, args) = command_for_session(&request, "inspect").expect("valid scidekick command");
         assert_eq!(
             args,
@@ -1048,17 +1079,8 @@ mod tests {
 
     #[test]
     fn scidekick_session_passes_resume_flag() {
-        let request = StartSessionRequest {
-            agent_id: "scidekick".to_string(),
-            workspace_path: ".".to_string(),
-            prompt: "ignored".to_string(),
-            command: None,
-            args: None,
-            model: None,
-            thinking_effort: None,
-            previous_scidekick_session_id: Some("01abcdef-1234-5678".to_string()),
-            conversation_id: None,
-        };
+        let mut request = scidekick_request_fixture("scidekick");
+        request.previous_scidekick_session_id = Some("01abcdef-1234-5678".to_string());
         let (_, args) = command_for_session(&request, "followup").expect("valid");
         assert_eq!(
             args,
@@ -1074,18 +1096,47 @@ mod tests {
     }
 
     #[test]
+    fn scidekick_session_emits_approval_mode_when_non_default() {
+        let mut request = scidekick_request_fixture("scidekick");
+        request.approval_mode = Some("yolo".to_string());
+        let (_, args) = command_for_session(&request, "ship it").expect("valid");
+        assert_eq!(
+            args,
+            vec!["--print", "--mode", "json", "--approval-mode", "yolo", "ship it"]
+        );
+    }
+
+    #[test]
+    fn scidekick_session_omits_approval_mode_for_default_and_blank() {
+        // "default" is the sentinel for "let sk decide" — we must not pass the flag.
+        let mut request = scidekick_request_fixture("scidekick");
+        request.approval_mode = Some("default".to_string());
+        let (_, args) = command_for_session(&request, "run").expect("valid");
+        assert_eq!(args, vec!["--print", "--mode", "json", "run"]);
+
+        request.approval_mode = Some("   ".to_string());
+        let (_, args) = command_for_session(&request, "run").expect("valid");
+        assert_eq!(args, vec!["--print", "--mode", "json", "run"]);
+    }
+
+    #[test]
+    fn scidekick_session_prepends_attachments_as_at_tokens() {
+        let mut request = scidekick_request_fixture("scidekick");
+        request.attachments = Some(vec![
+            "/tmp/a.png".to_string(),
+            "  ".to_string(), // dropped
+            " /tmp/b.md".to_string(),
+        ]);
+        let (_, args) = command_for_session(&request, "describe").expect("valid");
+        assert_eq!(
+            args,
+            vec!["--print", "--mode", "json", "@/tmp/a.png", "@/tmp/b.md", "describe"]
+        );
+    }
+
+    #[test]
     fn custom_session_requires_command() {
-        let request = StartSessionRequest {
-            agent_id: "acp".to_string(),
-            workspace_path: ".".to_string(),
-            prompt: "ignored".to_string(),
-            command: None,
-            args: None,
-            model: None,
-            thinking_effort: None,
-            previous_scidekick_session_id: None,
-            conversation_id: None,
-        };
+        let request = scidekick_request_fixture("acp");
         assert!(command_for_session(&request, "inspect").is_err());
     }
 

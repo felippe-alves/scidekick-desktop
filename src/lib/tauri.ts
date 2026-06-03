@@ -100,3 +100,17 @@ export async function pickAgentBinary(): Promise<string | null> {
   });
   return typeof selected === "string" ? selected : null;
 }
+
+/// Multi-file picker for attaching files to a turn. sk reads `@<path>`
+/// tokens in the prompt, so the consumer side is responsible for prepending
+/// the `@` prefix; this wrapper just returns absolute paths.
+export async function pickAttachments(): Promise<string[]> {
+  const selected = await open({
+    directory: false,
+    multiple: true,
+    title: "Attach files",
+  });
+  if (!selected) return [];
+  const list = Array.isArray(selected) ? selected : [selected];
+  return list.filter((value): value is string => typeof value === "string");
+}

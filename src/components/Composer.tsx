@@ -1,7 +1,7 @@
-import { ArrowUp, ChevronDown, Paperclip } from "lucide-react";
-import { EFFORT_OPTIONS, MODEL_OPTIONS } from "../lib/agentOptions";
+import { ArrowUp, ChevronDown, Paperclip, X } from "lucide-react";
+import { APPROVAL_OPTIONS, EFFORT_OPTIONS, MODEL_OPTIONS } from "../lib/agentOptions";
 import type { AgentDefinition } from "../types/agent";
-import type { PermissionMode } from "../types/ui";
+import type { ApprovalMode } from "../types/ui";
 
 interface ComposerProps {
   agents: AgentDefinition[];
@@ -11,7 +11,7 @@ interface ComposerProps {
   prompt: string;
   busy: boolean;
   workspaceReady: boolean;
-  permissionMode: PermissionMode;
+  approvalMode: ApprovalMode;
   selectedModel: string;
   thinkingEffort: string;
   attachments: string[];
@@ -19,11 +19,11 @@ interface ComposerProps {
   onCustomCommandChange: (command: string) => void;
   onCustomArgsChange: (args: string) => void;
   onPromptChange: (prompt: string) => void;
-  onPermissionModeChange: (mode: PermissionMode) => void;
+  onApprovalModeChange: (mode: ApprovalMode) => void;
   onSelectedModelChange: (model: string) => void;
   onThinkingEffortChange: (effort: string) => void;
   onAddAttachment: () => void;
-  onRemoveAttachment: (name: string) => void;
+  onRemoveAttachment: (path: string) => void;
   onSubmit: (event: React.FormEvent) => void;
 }
 
@@ -35,7 +35,7 @@ export function Composer({
   prompt,
   busy,
   workspaceReady,
-  permissionMode,
+  approvalMode,
   selectedModel,
   thinkingEffort,
   attachments,
@@ -43,7 +43,7 @@ export function Composer({
   onCustomCommandChange,
   onCustomArgsChange,
   onPromptChange,
-  onPermissionModeChange,
+  onApprovalModeChange,
   onSelectedModelChange,
   onThinkingEffortChange,
   onAddAttachment,
@@ -78,11 +78,19 @@ export function Composer({
 
       {attachments.length > 0 ? (
         <div className="attachment-strip">
-          {attachments.map((attachment) => (
-            <button key={attachment} type="button" onClick={() => onRemoveAttachment(attachment)}>
+          {attachments.map((path) => (
+            <span key={path} className="attachment-chip" title={path}>
               <Paperclip size={12} />
-              {attachment}
-            </button>
+              <span className="attachment-name">{attachmentLabel(path)}</span>
+              <button
+                type="button"
+                className="attachment-remove"
+                onClick={() => onRemoveAttachment(path)}
+                aria-label={`Remove attachment ${attachmentLabel(path)}`}
+              >
+                <X size={11} />
+              </button>
+            </span>
           ))}
         </div>
       ) : null}
@@ -104,7 +112,12 @@ export function Composer({
 
       <div className="composer-toolbar">
         <div className="composer-tools-left">
-          <button className="toolbar-icon" type="button" title="Attach" onClick={onAddAttachment}>
+          <button
+            className="toolbar-icon"
+            type="button"
+            title="Attach files"
+            onClick={onAddAttachment}
+          >
             <Paperclip size={14} />
           </button>
 
@@ -149,28 +162,25 @@ export function Composer({
                 </select>
                 <ChevronDown className="chev" size={11} />
               </span>
+
+              <span className="engine-picker approval-picker" title="Tool approval mode">
+                <select
+                  value={approvalMode}
+                  onChange={(event) => onApprovalModeChange(event.target.value as ApprovalMode)}
+                >
+                  {APPROVAL_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                <ChevronDown className="chev" size={11} />
+              </span>
             </>
           ) : null}
-
-          <button
-            className="toolbar-chip"
-            type="button"
-            onClick={() =>
-              onPermissionModeChange(permissionMode === "accept-edits" ? "default" : "accept-edits")
-            }
-            title="Permission mode"
-          >
-            {permissionMode === "accept-edits" ? "Accept edits" : "Default permissions"}
-            <ChevronDown className="chev" size={11} />
-          </button>
         </div>
 
         <div className="composer-tools-right">
-          {busy ? (
-            <button className="stop-button" type="button" title="Stop">
-              Stop
-            </button>
-          ) : null}
           <button
             className="send-button"
             disabled={sendDisabled}
@@ -184,4 +194,11 @@ export function Composer({
       </div>
     </form>
   );
+}
+
+/// Render `/Users/me/Pictures/foo.png` as `foo.png`. Falls back to the
+/// full path when there is no separator (already a basename).
+function attachmentLabel(path: string): string {
+  const last = path.split(/[\\/]/).pop();
+  return last && last.length > 0 ? last : path;
 }

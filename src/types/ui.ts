@@ -1,6 +1,9 @@
 export type ToolId = "terminal" | "browser" | "git" | "files" | "project-files" | "mcp" | "tasks" | "agents";
 
-export type PermissionMode = "default" | "accept-edits" | "plan";
+/// sk's approval-mode flag values. `"default"` is the harness sentinel for
+/// "do not pass --approval-mode" — sk falls back to its own
+/// `tools.approvalMode` config in that case.
+export type ApprovalMode = "default" | "always-ask" | "write" | "yolo";
 
 export interface ToolDefinition {
   id: ToolId;
@@ -16,8 +19,7 @@ export interface ComposerState {
   selectedAgentId: string;
   customCommand: string;
   customArgs: string;
-  planMode: boolean;
-  permissionMode: PermissionMode;
+  approvalMode: ApprovalMode;
   thinkingVisible: boolean;
   attachments: string[];
 }

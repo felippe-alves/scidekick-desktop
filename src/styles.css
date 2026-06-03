@@ -921,10 +921,11 @@ code { color: var(--accent-soft); overflow-wrap: anywhere; }
 .composer textarea:focus { box-shadow: none; }
 
 .attachment-strip { display: flex; flex-wrap: wrap; gap: 0.32rem; }
-.attachment-strip button {
+.attachment-chip {
   display: inline-flex;
   align-items: center;
   gap: 0.3rem;
+  max-width: 16rem;
   border: 1px solid var(--border-soft);
   border-radius: 999px;
   padding: 0.22rem 0.5rem;
@@ -932,7 +933,24 @@ code { color: var(--accent-soft); overflow-wrap: anywhere; }
   background: oklch(0 0 0 / 0.2);
   font-size: 0.74rem;
 }
-.attachment-strip button:hover { color: var(--text); }
+.attachment-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+}
+.attachment-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.05rem;
+  height: 1.05rem;
+  border-radius: 999px;
+  color: var(--text-faint);
+  background: transparent;
+  transition: color var(--dur) var(--ease), background var(--dur) var(--ease);
+}
+.attachment-remove:hover { color: var(--text); background: oklch(1 0 0 / 0.08); }
 
 .adapter-row {
   display: grid;

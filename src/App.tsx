@@ -18,6 +18,7 @@ import {
   listWorkspaceFiles,
   listWorkspaces,
   pickAgentBinary,
+  pickAttachments,
   pickWorkspaceDirectory,
   probeAgent,
   removeWorkspace,
@@ -37,7 +38,7 @@ import {
   type SessionRecord,
   type Workspace,
 } from "./types/agent";
-import type { PermissionMode, ToolId } from "./types/ui";
+import type { ApprovalMode, ToolId } from "./types/ui";
 import { parseSkEvent, type SkEvent } from "./types/scidekick";
 
 export interface RunningSession {
@@ -80,7 +81,8 @@ export function App() {
   const [activeTool, setActiveTool] = useState<ToolId>("project-files");
   const [bottomTools, setBottomTools] = useState<ToolId[]>([]);
   const [rightPanelWidth, setRightPanelWidth] = useState(360);
-  const [permissionMode, setPermissionMode] = useState<PermissionMode>("default");
+  // approvalMode is derived from settings.composer.approvalMode; persistence
+  // happens through persistComposerChange below.
   const [thinkingEffort, setThinkingEffort] = useState<string>("default");
   const [selectedModel, setSelectedModel] = useState<string>("default");
   const [activeScidekickSessionId, setActiveScidekickSessionId] = useState<string | null>(null);
@@ -106,6 +108,18 @@ export function App() {
     if (!activeConversationId) return [];
     return sessions.filter((session) => conversationIdForSession(session) === activeConversationId);
   }, [activeConversationId, sessions]);
+
+  // Approval mode is the single source of truth for the --approval-mode
+  // flag. We derive it from settings.composer.approvalMode and guard the
+  // string against legacy values that may live in old harness-store.json
+  // files (e.g. the obsolete "accept-edits").
+  const approvalMode: ApprovalMode = useMemo(() => {
+    const raw = settings.composer.approvalMode;
+    if (raw === "always-ask" || raw === "write" || raw === "yolo" || raw === "default") {
+      return raw;
+    }
+    return "default";
+  }, [settings.composer.approvalMode]);
 
 
   useEffect(() => {
@@ -338,6 +352,7 @@ export function App() {
     if (prompt.trim() === "") return;
 
     const sentPrompt = prompt;
+    const sentAttachments = attachments;
     const isScidekick = selectedAgent.id === "scidekick";
     const followUpSid =
       isScidekick && activeScidekickSessionId ? activeScidekickSessionId : undefined;
@@ -345,6 +360,9 @@ export function App() {
 
     setError(null);
     setPrompt("");
+    // Clear attachments optimistically; restore on failure so the user does
+    // not lose their selection.
+    setAttachments([]);
 
     try {
       const started = await startAgentSession({
@@ -356,6 +374,10 @@ export function App() {
         model: isScidekick && selectedModel !== "default" ? selectedModel : undefined,
         thinkingEffort:
           isScidekick && thinkingEffort !== "default" ? thinkingEffort : undefined,
+        approvalMode:
+          isScidekick && approvalMode !== "default" ? approvalMode : undefined,
+        attachments:
+          isScidekick && sentAttachments.length > 0 ? sentAttachments : undefined,
         previousScidekickSessionId: followUpSid,
         conversationId,
       });
@@ -388,6 +410,7 @@ export function App() {
       console.error("[scidekick-desktop] startAgentSession failed:", err);
       setError(readError(err));
       setPrompt(sentPrompt);
+      setAttachments(sentAttachments);
     }
   }
 
@@ -438,6 +461,25 @@ export function App() {
   function handleThinkingEffortChange(effort: string) {
     setThinkingEffort(effort);
     persistComposerChange({ thinkingEffort: effort });
+  }
+
+  function handleApprovalModeChange(mode: ApprovalMode) {
+    persistComposerChange({ approvalMode: mode });
+  }
+
+  async function handlePickAttachments() {
+    try {
+      const picked = await pickAttachments();
+      if (picked.length === 0) return;
+      setAttachments((current) => {
+        const known = new Set(current);
+        const additions = picked.filter((path) => !known.has(path));
+        return additions.length > 0 ? [...current, ...additions] : current;
+      });
+    } catch (err) {
+      console.error("[scidekick-desktop] pickAttachments failed:", err);
+      setError(readError(err));
+    }
   }
 
   async function handleNewChat() {
@@ -590,7 +632,7 @@ export function App() {
             prompt={prompt}
             busy={busy || runningSession !== null}
             workspaceReady={!!activeWorkspace}
-            permissionMode={permissionMode}
+            approvalMode={approvalMode}
             selectedModel={selectedModel}
             thinkingEffort={thinkingEffort}
             attachments={attachments}
@@ -598,11 +640,11 @@ export function App() {
             onCustomCommandChange={setCustomCommand}
             onCustomArgsChange={setCustomArgs}
             onPromptChange={setPrompt}
-            onPermissionModeChange={setPermissionMode}
+            onApprovalModeChange={handleApprovalModeChange}
             onSelectedModelChange={handleSelectedModelChange}
             onThinkingEffortChange={handleThinkingEffortChange}
-            onAddAttachment={() => setAttachments((current) => [...current, `context-${current.length + 1}.png`])}
-            onRemoveAttachment={(name) => setAttachments((current) => current.filter((item) => item !== name))}
+            onAddAttachment={handlePickAttachments}
+            onRemoveAttachment={(path) => setAttachments((current) => current.filter((item) => item !== path))}
             onSubmit={handleStartSession}
           />
         </ChatSurface>

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { CheckCircle2, FolderOpen, Loader2, RefreshCw, X, XCircle } from "lucide-react";
-import { EFFORT_OPTIONS, MODEL_OPTIONS } from "../lib/agentOptions";
+import { APPROVAL_OPTIONS, EFFORT_OPTIONS, MODEL_OPTIONS } from "../lib/agentOptions";
 import type { AgentProbeResult, HarnessSettings } from "../types/agent";
 
 interface SettingsDialogProps {
@@ -12,13 +12,6 @@ interface SettingsDialogProps {
   onPickBinary: () => Promise<string | null>;
   onProbeBinary: (command: string) => Promise<AgentProbeResult>;
 }
-
-const APPROVAL_OPTIONS: Array<{ value: string; label: string; hint: string }> = [
-  { value: "default", label: "Inherit from sk", hint: "Use sk's tools.approvalMode config." },
-  { value: "always-ask", label: "Always ask", hint: "Prompt before every tool call." },
-  { value: "write", label: "Auto-approve reads", hint: "Reads run silently; writes still prompt." },
-  { value: "yolo", label: "YOLO", hint: "Auto-approve everything. Trust nothing else." },
-];
 
 export function SettingsDialog({
   open,

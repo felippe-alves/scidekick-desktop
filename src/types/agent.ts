@@ -47,6 +47,12 @@ export interface StartSessionRequest {
   args?: string[];
   model?: string;
   thinkingEffort?: string;
+  /// sk's --approval-mode value. `"default"` (or omitted) leaves sk's own
+  /// `tools.approvalMode` config in charge.
+  approvalMode?: string;
+  /// Absolute paths attached to this turn; the backend wires them in as
+  /// `@<path>` positional tokens before the prompt.
+  attachments?: string[];
   previousScidekickSessionId?: string;
   conversationId?: string;
 }
