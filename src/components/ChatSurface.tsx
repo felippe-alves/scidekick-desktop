@@ -3,6 +3,8 @@ import { Brain, FolderOpen, Hammer, Square, Terminal } from "lucide-react";
 import { stripAnsi } from "../lib/commandLine";
 import { parseSkEvent, type SkContent, type SkEvent, type SkMessage } from "../types/scidekick";
 import { reduceEvents, type ReducedTurn } from "../lib/skEventReducer";
+import { extractTraceView } from "../lib/traceView";
+import { TraceResultCard } from "./TraceResultCard";
 import type { RunningSession } from "../App";
 import type { SessionRecord, Workspace } from "../types/agent";
 
@@ -294,6 +296,10 @@ function AssistantBlocks({ turn }: { turn: ReducedTurn }) {
         }
         if (block.type === "toolCall") {
           const exec = turn.toolExecutions.get(block.id);
+          if (block.name === "claim_evaluate") {
+            const trace = extractTraceView(exec?.result);
+            if (trace) return <TraceResultCard key={i} model={trace} />;
+          }
           return (
             <ToolCallCard
               key={i}

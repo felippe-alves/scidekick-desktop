@@ -1768,3 +1768,31 @@ pre {
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
+
+/* Claim -> evidence trace view (claim_evaluate result) */
+.trace-card {
+  margin: 6px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-2);
+  font-size: 12.5px;
+}
+.trace-head { display: flex; align-items: center; gap: 8px; margin-bottom: 7px; }
+.trace-title { font-weight: 500; color: var(--text); }
+.trace-badge {
+  text-transform: uppercase; letter-spacing: 0.05em; font-size: 10px; font-weight: 500;
+  padding: 1px 8px; border-radius: 999px;
+}
+.trace-supported .trace-badge { color: var(--accent); background: var(--accent-bg); }
+.trace-incomplete .trace-badge { color: var(--warn); background: oklch(0.820 0.150 78 / 0.14); }
+.trace-unsupported .trace-badge { color: var(--danger); background: oklch(0.700 0.175 22 / 0.14); }
+.trace-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+.trace-list li { display: flex; gap: 6px; align-items: baseline; color: var(--text-body); }
+.trace-mark { width: 1em; flex: none; text-align: center; }
+.trace-ok .trace-mark { color: var(--accent); }
+.trace-miss .trace-mark { color: var(--warn); }
+.trace-unsupported .trace-miss .trace-mark { color: var(--danger); }
+.trace-req { color: var(--text); }
+.trace-reason { color: var(--text-faint); }
+.trace-dangling, .trace-cycle { color: var(--danger); }
