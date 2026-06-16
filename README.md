@@ -35,3 +35,23 @@ open "$HOME/.cache/scidekick-desktop-target/release/bundle/macos/Scidekick Deskt
 ```
 
 More details and Linux instructions are in `docs/building.md`.
+
+## Using the scidekick-new engine
+
+This GUI spawns a configurable `sk` command per agent. To drive it with the greenfield
+**scidekick-new** engine, build that engine:
+
+```sh
+cd ../scidekick-new && bun run build   # produces packages/coding-agent/dist/cli.js
+```
+
+Then in the app's **Settings**, set the `scidekick` agent command to the **bare absolute
+path** of the built CLI — it is executable with a `node` shebang, so do **not** prefix it
+with `node`:
+
+```
+/abs/path/to/scidekick-new/packages/coding-agent/dist/cli.js
+```
+
+The engine's `--print --mode json` NDJSON stream is parsed by `src/lib/skEventReducer.ts`,
+unit-tested against captured engine output in `src/lib/skEventReducer.test.ts` (`npm test`).

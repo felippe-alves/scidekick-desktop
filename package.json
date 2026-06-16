@@ -12,7 +12,8 @@
     "build:mac:local": "CARGO_TARGET_DIR=\"$HOME/.cache/scidekick-desktop-target\" CI=true tauri build --bundles app,dmg",
     "build:linux": "CARGO_TARGET_DIR=\"$HOME/.cache/scidekick-desktop-target\" CI=true tauri build --bundles appimage,deb",
     "check": "tsc --noEmit && vite build",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "test": "vitest run"
   },
   "dependencies": {
     "@fontsource/ibm-plex-mono": "^5.2.7",
@@ -29,6 +30,7 @@
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^5.1.0",
     "typescript": "^5.9.0",
-    "vite": "^7.2.0"
+    "vite": "^7.2.0",
+    "vitest": "^3.2.4"
   }
 }

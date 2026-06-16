@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { Brain, FolderOpen, Hammer, Square, Terminal } from "lucide-react";
 import { stripAnsi } from "../lib/commandLine";
 import { parseSkEvent, type SkContent, type SkEvent, type SkMessage } from "../types/scidekick";
+import { reduceEvents, type ReducedTurn } from "../lib/skEventReducer";
 import type { RunningSession } from "../App";
 import type { SessionRecord, Workspace } from "../types/agent";
 
@@ -266,83 +267,7 @@ function Transcript({
   );
 }
 
-interface ReducedTurn {
-  assistantMessages: SkMessage[];
-  toolExecutions: Map<
-    string,
-    { toolCallId: string; toolName: string; args?: unknown; result?: unknown; status: "running" | "complete" | "error" }
-  >;
-}
-
-function reduceEvents(events: SkEvent[]): ReducedTurn {
-  const assistantMessages: SkMessage[] = [];
-  const toolExecutions = new Map<string, ReducedTurn["toolExecutions"] extends Map<string, infer V> ? V : never>();
-
-  // Track the index of the last in-progress assistant message so message_update can replace it.
-  let openAssistantIndex = -1;
-
-  for (const event of events) {
-    switch (event.type) {
-      case "message_start": {
-        if (event.message.role === "assistant") {
-          assistantMessages.push(event.message);
-          openAssistantIndex = assistantMessages.length - 1;
-        }
-        break;
-      }
-      case "message_update": {
-        if (event.message.role === "assistant" && openAssistantIndex >= 0) {
-          assistantMessages[openAssistantIndex] = event.message;
-        }
-        break;
-      }
-      case "message_end": {
-        if (event.message.role === "assistant" && openAssistantIndex >= 0) {
-          assistantMessages[openAssistantIndex] = event.message;
-          openAssistantIndex = -1;
-        }
-        break;
-      }
-      case "tool_execution_start": {
-        toolExecutions.set(event.toolCallId, {
-          toolCallId: event.toolCallId,
-          toolName: event.toolName,
-          args: event.args,
-          status: "running",
-        });
-        break;
-      }
-      case "tool_execution_update": {
-        const existing = toolExecutions.get(event.toolCallId);
-        if (existing) {
-          toolExecutions.set(event.toolCallId, {
-            ...existing,
-            args: event.args ?? existing.args,
-          });
-        }
-        break;
-      }
-      case "tool_execution_end": {
-        const existing = toolExecutions.get(event.toolCallId) ?? {
-          toolCallId: event.toolCallId,
-          toolName: event.toolName,
-          args: undefined,
-          status: "complete" as const,
-        };
-        toolExecutions.set(event.toolCallId, {
-          ...existing,
-          result: event.result,
-          status: event.isError ? "error" : "complete",
-        });
-        break;
-      }
-      default:
-        break;
-    }
-  }
-
-  return { assistantMessages, toolExecutions };
-}
+// reduceEvents + ReducedTurn now live in ../lib/skEventReducer.ts
 
 function AssistantBlocks({ turn }: { turn: ReducedTurn }) {
   const blocks: SkContent[] = [];
@@ -358,10 +283,7 @@ function AssistantBlocks({ turn }: { turn: ReducedTurn }) {
     <div className="assistant-blocks">
       {blocks.map((block, i) => {
         if (block.type === "thinking") {
-          return <ThinkingBlock key={i} text={block.thinking} />;
-        }
-        if (block.type === "redactedThinking") {
-          return <ThinkingBlock key={i} text="[redacted]" redacted />;
+          return <ThinkingBlock key={i} text={block.redacted ? "[redacted]" : block.thinking} redacted={block.redacted} />;
         }
         if (block.type === "text") {
           return (
@@ -382,7 +304,11 @@ function AssistantBlocks({ turn }: { turn: ReducedTurn }) {
             />
           );
         }
-        return null;
+        return (
+          <div key={i} className="agent-stream unknown-block">
+            [unsupported block: {(block as { type?: string }).type ?? "unknown"}]
+          </div>
+        );
       })}
     </div>
   );

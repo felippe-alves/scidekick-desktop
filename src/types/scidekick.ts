@@ -7,8 +7,7 @@ export type SkRole = "user" | "developer" | "assistant" | "toolResult";
 
 export type SkContent =
   | { type: "text"; text: string; textSignature?: string }
-  | { type: "thinking"; thinking: string; thinkingSignature?: string }
-  | { type: "redactedThinking"; data: string }
+  | { type: "thinking"; thinking: string; thinkingSignature?: string; redacted?: boolean }
   | { type: "toolCall"; id: string; name: string; arguments?: unknown }
   | { type: "image"; mimeType?: string; source?: unknown };
 
