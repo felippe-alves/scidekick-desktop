@@ -22,10 +22,12 @@ describe("Markdown", () => {
     expect(out).toContain("<li>first</li>");
   });
 
-  it("renders fenced code blocks as pre > code with a language class", () => {
+  it("renders fenced code blocks (Shiki highlighting is async, so static render hits the plain fallback)", () => {
+    // Shiki highlights in a useEffect; renderToStaticMarkup runs no effects, so we
+    // get the escaped plain-code fallback carrying the language tag.
     const out = html("```ts\nconst x = 1;\n```");
-    expect(out).toContain("<pre>");
-    expect(out).toMatch(/<code class="[^"]*language-ts[^"]*">/);
+    expect(out).toContain('data-lang="ts"');
+    expect(out).toContain("code-block");
     expect(out).toContain("const x = 1;");
   });
 

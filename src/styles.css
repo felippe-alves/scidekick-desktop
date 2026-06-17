@@ -747,6 +747,26 @@ code { color: var(--accent-soft); overflow-wrap: anywhere; }
 /* Keep wide display math from forcing the whole bubble to scroll. */
 .markdown-body .katex-display { overflow-x: auto; overflow-y: hidden; padding: 0.2rem 0; }
 
+/* Fenced code blocks: Shiki-highlighted (.code-block > .shiki) and the plain
+   fallback (.code-block-plain, which keeps the default .markdown-body pre look). */
+.markdown-body .code-block { margin: 0.6rem 0; }
+.markdown-body .code-block .shiki {
+  margin: 0;
+  padding: 0.7rem 0.85rem;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
+  overflow-x: auto;
+  font-size: 0.84rem;
+  line-height: 1.5;
+  /* Shiki sets its own theme background inline; only the radius/border are ours. */
+}
+.markdown-body .code-block .shiki code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-family: var(--font-mono);
+}
+
 .running-indicator {
   display: inline-flex;
   align-items: center;
