@@ -5,6 +5,7 @@ import { parseSkEvent, type SkContent, type SkEvent, type SkMessage } from "../t
 import { reduceEvents, type ReducedTurn } from "../lib/skEventReducer";
 import { extractTraceView } from "../lib/traceView";
 import { TraceResultCard } from "./TraceResultCard";
+import { Markdown } from "./Markdown";
 import type { RunningSession } from "../App";
 import type { SessionRecord, Workspace } from "../types/agent";
 
@@ -288,11 +289,7 @@ function AssistantBlocks({ turn }: { turn: ReducedTurn }) {
           return <ThinkingBlock key={i} text={block.redacted ? "[redacted]" : block.thinking} redacted={block.redacted} />;
         }
         if (block.type === "text") {
-          return (
-            <div key={i} className="agent-stream">
-              {stripAnsi(block.text)}
-            </div>
-          );
+          return <Markdown key={i}>{stripAnsi(block.text)}</Markdown>;
         }
         if (block.type === "toolCall") {
           const exec = turn.toolExecutions.get(block.id);
