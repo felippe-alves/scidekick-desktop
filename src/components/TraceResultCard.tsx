@@ -1,4 +1,5 @@
 import type { TraceViewModel } from "../lib/traceView";
+import { TraceGraph } from "./TraceGraph";
 
 // Renders a claim's evidence trace as a colored requirement tree — the GUI twin of the
 // TUI renderClaimTrace. Status drives the color: supported=green, incomplete=amber,
@@ -40,6 +41,12 @@ export function TraceResultCard({ model }: { model: TraceViewModel }) {
           </li>
         ) : null}
       </ul>
+      {model.graph && model.graph.nodes.length >= 2 ? (
+        <details className="trace-graph-details" open>
+          <summary>evidence graph · {model.graph.nodes.length} nodes</summary>
+          <TraceGraph data={model.graph} />
+        </details>
+      ) : null}
     </div>
   );
 }

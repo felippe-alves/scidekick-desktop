@@ -1903,3 +1903,41 @@ pre {
 .trace-req { color: var(--text); }
 .trace-reason { color: var(--text-faint); }
 .trace-dangling, .trace-cycle { color: var(--danger); }
+
+/* Evidence graph (node-link SVG) inside the trace card. */
+.trace-graph-details { margin-top: 9px; border-top: 1px solid var(--border-soft); padding-top: 8px; }
+.trace-graph-details > summary {
+  cursor: pointer;
+  list-style: none;
+  font-size: 0.74rem;
+  color: var(--text-muted);
+  user-select: none;
+}
+.trace-graph-details > summary::-webkit-details-marker { display: none; }
+.trace-graph-details > summary:hover { color: var(--text); }
+.trace-graph-wrap { overflow-x: auto; padding: 8px 2px 2px; }
+.trace-graph { display: block; }
+.trace-edge { stroke: var(--border-firm); stroke-width: 1.4; fill: none; }
+.trace-edge-arrow { fill: var(--border-firm); }
+.trace-node rect {
+  fill: var(--surface-2);
+  stroke: var(--border);
+  stroke-width: 1;
+}
+.trace-node-kind {
+  font-family: var(--font-mono);
+  font-size: 8px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  fill: var(--text-dim);
+}
+.trace-node-title { font-family: var(--font-sans); font-size: 11px; fill: var(--text-body); }
+/* Kind-tinted nodes; the claim is the focal node. */
+.trace-node-claim rect { fill: var(--accent-bg-2); stroke: var(--accent); stroke-width: 1.5; }
+.trace-node-figure rect { stroke: oklch(0.700 0.110 230); }
+.trace-node-analysis rect { stroke: oklch(0.700 0.120 300); }
+.trace-node-dataset rect { stroke: oklch(0.720 0.110 190); }
+.trace-node-experiment rect { stroke: var(--warn); }
+.trace-node-note rect { stroke: var(--border-firm); }
+.trace-node-manuscript rect { stroke: oklch(0.760 0.090 60); }
+.trace-node-paper rect { stroke: oklch(0.700 0.100 330); }

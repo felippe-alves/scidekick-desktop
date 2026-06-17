@@ -39,4 +39,47 @@ describe("extractTraceView", () => {
     expect(extractTraceView({ content: [{ type: "text", text: "x" }] })).toBeNull();
     expect(extractTraceView("plain string")).toBeNull();
   });
+
+  it("extracts the evidence subgraph when the engine emits one", () => {
+    const m = extractTraceView({
+      details: {
+        status: "supported",
+        satisfied: ["evidence"],
+        missing: [],
+        danglingRefs: [],
+        graph: {
+          nodes: [
+            { id: "claim_1", kind: "claim", title: "C" },
+            { id: "fig_1", kind: "figure", title: "F" },
+          ],
+          edges: [{ from: "claim_1", rel: "Supports", to: "fig_1" }],
+        },
+      },
+    });
+    expect(m?.graph?.nodes.map((n) => n.id)).toEqual(["claim_1", "fig_1"]);
+    expect(m?.graph?.edges).toEqual([{ from: "claim_1", rel: "Supports", to: "fig_1" }]);
+  });
+
+  it("drops edges that point at nodes outside the subgraph, and tolerates a missing graph", () => {
+    const m = extractTraceView({
+      details: {
+        status: "incomplete",
+        satisfied: [],
+        missing: [],
+        danglingRefs: ["ghost"],
+        graph: {
+          nodes: [{ id: "claim_1", kind: "claim", title: "C" }],
+          edges: [{ from: "claim_1", rel: "Supports", to: "ghost" }],
+        },
+      },
+    });
+    // The dangling edge to "ghost" is dropped; the node still extracts.
+    expect(m?.graph?.nodes.map((n) => n.id)).toEqual(["claim_1"]);
+    expect(m?.graph?.edges).toEqual([]);
+
+    // Older engine with no graph field at all still yields a valid view model.
+    const old = extractTraceView({ details: { status: "supported", satisfied: [], missing: [], danglingRefs: [] } });
+    expect(old?.status).toBe("supported");
+    expect(old?.graph).toBeUndefined();
+  });
 });
