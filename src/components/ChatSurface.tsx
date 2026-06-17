@@ -4,7 +4,9 @@ import { stripAnsi } from "../lib/commandLine";
 import { parseSkEvent, type SkContent, type SkEvent, type SkMessage } from "../types/scidekick";
 import { reduceEvents, type ReducedTurn } from "../lib/skEventReducer";
 import { extractTraceView } from "../lib/traceView";
+import { extractFigures } from "../lib/figureView";
 import { TraceResultCard } from "./TraceResultCard";
+import { FigureCard } from "./FigureCard";
 import { Markdown } from "./Markdown";
 import type { RunningSession } from "../App";
 import type { SessionRecord, Workspace } from "../types/agent";
@@ -78,6 +80,7 @@ export function ChatSurface({
           <Transcript
             prompt={runningSession.prompt}
             agentId={runningSession.agentId}
+            workspacePath={runningSession.workspacePath}
             stdout={runningSession.stdout}
             stderr={runningSession.stderr}
             events={runningSession.events}
@@ -152,6 +155,7 @@ function CompletedSession({ session }: { session: SessionRecord }) {
     <Transcript
       prompt={session.prompt}
       agentId={session.agentId}
+      workspacePath={session.workspacePath}
       stdout={rawStdout}
       stderr={session.stderr}
       events={events}
@@ -165,6 +169,7 @@ function CompletedSession({ session }: { session: SessionRecord }) {
 interface TranscriptProps {
   prompt: string;
   agentId: string;
+  workspacePath: string;
   stdout: string;
   stderr: string;
   events: SkEvent[];
@@ -178,6 +183,7 @@ interface TranscriptProps {
 function Transcript({
   prompt,
   agentId,
+  workspacePath,
   stdout,
   stderr,
   events,
@@ -206,7 +212,7 @@ function Transcript({
       <div className={`message agent-message ${status}`}>
         <div className="bubble">
           {hasStructured ? (
-            <AssistantBlocks turn={turn} />
+            <AssistantBlocks turn={turn} workspacePath={workspacePath} />
           ) : cleanStdout ? (
             <div className="agent-stream">{cleanStdout}</div>
           ) : null}
@@ -272,7 +278,7 @@ function Transcript({
 
 // reduceEvents + ReducedTurn now live in ../lib/skEventReducer.ts
 
-function AssistantBlocks({ turn }: { turn: ReducedTurn }) {
+function AssistantBlocks({ turn, workspacePath }: { turn: ReducedTurn; workspacePath: string }) {
   const blocks: SkContent[] = [];
   for (const msg of turn.assistantMessages) {
     if (typeof msg.content === "string") {
@@ -297,14 +303,19 @@ function AssistantBlocks({ turn }: { turn: ReducedTurn }) {
             const trace = extractTraceView(exec?.result);
             if (trace) return <TraceResultCard key={i} model={trace} />;
           }
+          const figures = block.name === "marimo_run" ? extractFigures(exec?.result) : null;
           return (
-            <ToolCallCard
-              key={i}
-              name={block.name}
-              args={block.arguments}
-              status={exec?.status ?? "running"}
-              result={exec?.result}
-            />
+            <div key={i} className="tool-block">
+              <ToolCallCard
+                name={block.name}
+                args={block.arguments}
+                status={exec?.status ?? "running"}
+                result={exec?.result}
+              />
+              {figures && workspacePath ? (
+                <FigureCard workspacePath={workspacePath} figures={figures} />
+              ) : null}
+            </div>
           );
         }
         return (

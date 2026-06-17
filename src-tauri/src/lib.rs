@@ -148,6 +148,12 @@ struct FileEntry {
 }
 
 #[derive(Serialize)]
+struct FilePreview {
+    mime: String,
+    base64: String,
+}
+
+#[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct HarnessHealth {
     ok: bool,
@@ -703,6 +709,34 @@ fn list_workspace_files(
     list_files_in_dir(&workspace, limit.unwrap_or(80).min(240))
 }
 
+/// Read a file inside the workspace and return it as a base64 data payload, so the
+/// frontend can show it via a `data:` URI (the CSP allows `img-src 'self' data:`).
+/// The path is resolved and confined to the workspace — no traversal outside it.
+#[tauri::command]
+fn read_file_base64(workspace_path: String, relative_path: String) -> Result<FilePreview, String> {
+    const MAX_BYTES: u64 = 12 * 1024 * 1024;
+    let workspace = canonical_workspace_path(&workspace_path)?;
+    let target = workspace
+        .join(&relative_path)
+        .canonicalize()
+        .map_err(|err| format!("file not found: {err}"))?;
+    if !target.starts_with(&workspace) {
+        return Err("refusing to read a file outside the workspace".to_string());
+    }
+    let metadata = fs::metadata(&target).map_err(|err| format!("failed to stat file: {err}"))?;
+    if !metadata.is_file() {
+        return Err("not a file".to_string());
+    }
+    if metadata.len() > MAX_BYTES {
+        return Err("file is too large to preview".to_string());
+    }
+    let bytes = fs::read(&target).map_err(|err| format!("failed to read file: {err}"))?;
+    Ok(FilePreview {
+        mime: mime_for(&target),
+        base64: base64_encode(&bytes),
+    })
+}
+
 #[tauri::command]
 fn git_status(workspace_path: String) -> Result<CommandRunResult, String> {
     let workspace = canonical_workspace_path(&workspace_path)?;
@@ -888,6 +922,49 @@ fn path_to_string(path: &Path) -> Result<String, String> {
         .ok_or_else(|| "path is not valid UTF-8".to_string())
 }
 
+fn mime_for(path: &Path) -> String {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "pdf" => "application/pdf",
+        _ => "application/octet-stream",
+    }
+    .to_string()
+}
+
+/// Standard base64 (with padding). Inlined to avoid a dependency for a single use.
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[((n >> 18) & 63) as usize] as char);
+        out.push(TABLE[((n >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            TABLE[((n >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[(n & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
 fn read_store(app: &AppHandle) -> Result<HarnessStore, String> {
     let path = store_path(app)?;
     match fs::read_to_string(path) {
@@ -993,7 +1070,8 @@ pub fn run() {
             update_settings,
             git_status,
             run_shell_command,
-            list_workspace_files
+            list_workspace_files,
+            read_file_base64
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Scidekick Desktop");

@@ -39,6 +39,11 @@ export interface FileEntry {
   size: number | null;
 }
 
+export interface FilePreview {
+  mime: string;
+  base64: string;
+}
+
 export interface StartSessionRequest {
   agentId: string;
   workspacePath: string;

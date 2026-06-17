@@ -1941,3 +1941,43 @@ pre {
 .trace-node-note rect { stroke: var(--border-firm); }
 .trace-node-manuscript rect { stroke: oklch(0.760 0.090 60); }
 .trace-node-paper rect { stroke: oklch(0.700 0.100 330); }
+
+/* Figures produced by marimo_run, shown beneath the tool card. */
+.tool-block { display: grid; gap: 6px; }
+.figure-card {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
+}
+.figure-item {
+  margin: 0;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
+  background: var(--surface);
+  overflow: hidden;
+}
+.figure-item img {
+  display: block;
+  width: 100%;
+  height: auto;
+  background: white; /* most plots have transparent backgrounds; keep them legible */
+}
+.figure-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 120px;
+  color: var(--text-faint);
+  font-size: 0.78rem;
+}
+.figure-item figcaption {
+  padding: 5px 8px;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  border-top: 1px solid var(--border-soft);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

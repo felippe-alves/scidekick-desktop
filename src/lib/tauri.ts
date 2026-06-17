@@ -6,6 +6,7 @@ import type {
   AgentProbeResult,
   CommandRunResult,
   FileEntry,
+  FilePreview,
   HarnessHealth,
   HarnessSettings,
   SessionCompletePayload,
@@ -83,6 +84,11 @@ export function runShellCommand(request: ShellCommandRequest): Promise<CommandRu
 
 export function listWorkspaceFiles(workspacePath: string, limit = 80): Promise<FileEntry[]> {
   return invoke("list_workspace_files", { workspacePath, limit });
+}
+
+/** Read a workspace-relative file as a base64 data payload (for inline previews). */
+export function readFileBase64(workspacePath: string, relativePath: string): Promise<FilePreview> {
+  return invoke("read_file_base64", { workspacePath, relativePath });
 }
 
 export async function pickWorkspaceDirectory(): Promise<string | null> {
