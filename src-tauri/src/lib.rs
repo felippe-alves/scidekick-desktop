@@ -737,6 +737,51 @@ fn read_file_base64(workspace_path: String, relative_path: String) -> Result<Fil
     })
 }
 
+/// Read every object sidecar JSON under the workspace's `.sk/` store and return the
+/// parsed values. The frontend interprets them (the on-disk object layout is the
+/// stable contract). Skips the `sk.json` manifest and bounds the walk.
+#[tauri::command]
+fn read_sk_objects(workspace_path: String) -> Result<Vec<serde_json::Value>, String> {
+    const MAX_FILES: usize = 5000;
+    const MAX_BYTES: u64 = 4 * 1024 * 1024;
+    let workspace = canonical_workspace_path(&workspace_path)?;
+    let sk_dir = workspace.join(".sk");
+    if !sk_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    let mut stack = vec![sk_dir];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if out.len() >= MAX_FILES {
+                return Ok(out);
+            }
+            let path = entry.path();
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if !meta.is_file() || meta.len() > MAX_BYTES {
+                continue;
+            }
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name == "sk.json" || !name.ends_with(".json") {
+                continue;
+            }
+            if let Ok(content) = fs::read_to_string(&path) {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) {
+                    out.push(value);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
 #[tauri::command]
 fn git_status(workspace_path: String) -> Result<CommandRunResult, String> {
     let workspace = canonical_workspace_path(&workspace_path)?;
@@ -1071,7 +1116,8 @@ pub fn run() {
             git_status,
             run_shell_command,
             list_workspace_files,
-            read_file_base64
+            read_file_base64,
+            read_sk_objects
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Scidekick Desktop");

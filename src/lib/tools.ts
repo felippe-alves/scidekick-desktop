@@ -2,6 +2,7 @@ import {
   Bot,
   CheckSquare,
   FileText,
+  FlaskConical,
   FolderTree,
   GitBranch,
   Globe,
@@ -12,6 +13,14 @@ import {
 import type { ToolDefinition, ToolId } from "../types/ui";
 
 export const TOOL_DEFINITIONS: ToolDefinition[] = [
+  {
+    id: "research",
+    label: "Research",
+    description: "Browse the .sk workspace: objects, evidence links, and the journal.",
+    tint: "emerald",
+    side: true,
+    bottom: true,
+  },
   {
     id: "terminal",
     label: "Terminal",
@@ -79,6 +88,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
 ];
 
 export const TOOL_ICONS: Record<ToolId, LucideIcon> = {
+  research: FlaskConical,
   terminal: Terminal,
   browser: Globe,
   git: GitBranch,

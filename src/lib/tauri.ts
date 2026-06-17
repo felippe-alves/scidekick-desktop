@@ -91,6 +91,11 @@ export function readFileBase64(workspacePath: string, relativePath: string): Pro
   return invoke("read_file_base64", { workspacePath, relativePath });
 }
 
+/** Read every object sidecar JSON from the workspace's `.sk/` store (raw, unparsed). */
+export function readSkObjects(workspacePath: string): Promise<unknown[]> {
+  return invoke("read_sk_objects", { workspacePath });
+}
+
 export async function pickWorkspaceDirectory(): Promise<string | null> {
   const selected = await open({ directory: true, multiple: false, title: "Open Workspace" });
   return typeof selected === "string" ? selected : null;

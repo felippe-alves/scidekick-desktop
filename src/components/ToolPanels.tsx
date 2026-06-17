@@ -15,6 +15,7 @@ import { formatBytes } from "../lib/commandLine";
 import { getTool, TOOL_ICONS } from "../lib/tools";
 import type { AgentDefinition, CommandRunResult, FileEntry, SessionRecord, Workspace } from "../types/agent";
 import type { ToolId } from "../types/ui";
+import { ResearchPanel } from "./ResearchPanel";
 
 interface ToolPanelsProps {
   activeTool: ToolId;
@@ -91,6 +92,8 @@ function PanelShell({
 
 function ToolContent(props: ToolPanelsProps & { tool: ToolId; compact?: boolean }) {
   switch (props.tool) {
+    case "research":
+      return <ResearchPanel activeWorkspace={props.activeWorkspace} />;
     case "terminal":
       return <TerminalPanel {...props} />;
     case "browser":

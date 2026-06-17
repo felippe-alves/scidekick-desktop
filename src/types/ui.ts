@@ -1,4 +1,13 @@
-export type ToolId = "terminal" | "browser" | "git" | "files" | "project-files" | "mcp" | "tasks" | "agents";
+export type ToolId =
+  | "research"
+  | "terminal"
+  | "browser"
+  | "git"
+  | "files"
+  | "project-files"
+  | "mcp"
+  | "tasks"
+  | "agents";
 
 /// sk's approval-mode flag values. `"default"` is the harness sentinel for
 /// "do not pass --approval-mode" — sk falls back to its own
